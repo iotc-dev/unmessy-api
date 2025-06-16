@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "regions": ["syd1"],
+  "functions": {
+    "api/**/*.js": {
+      "maxDuration": 60
+    }
+  }
+}
