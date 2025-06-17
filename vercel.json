@@ -5,20 +5,31 @@
       "src": "src/index.js",
       "use": "@vercel/node",
       "config": {
-        "includeFiles": ["src/**/*"]
+        "maxLambdaSize": "50mb",
+        "includeFiles": [
+          "src/**"
+        ]
       }
     }
   ],
   "routes": [
     {
+      "src": "/api/(.*)",
+      "dest": "/src/index.js"
+    },
+    {
       "src": "/(.*)",
-      "dest": "src/index.js"
+      "dest": "/src/index.js"
     }
   ],
-  "env": {
-    "NODE_ENV": "production"
-  },
-  "github": {
-    "silent": true
+  "functions": {
+    "src/index.js": {
+      "runtime": "nodejs18.x",
+      "memory": 1024,
+      "maxDuration": 30,
+      "environment": {
+        "NODE_OPTIONS": "--experimental-modules"
+      }
+    }
   }
 }

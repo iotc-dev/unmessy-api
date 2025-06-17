@@ -62,6 +62,7 @@ export const config = {
     // ZeroBounce (Email Validation)
     zeroBounce: {
       apiKey: getOptional('ZERO_BOUNCE_API_KEY', ''),
+      baseUrl: getOptional('ZERO_BOUNCE_BASE_URL', 'https://api.zerobounce.net/v2'),
       enabled: parseBoolean(process.env.USE_ZERO_BOUNCE, false),
       timeout: parseInteger(process.env.ZERO_BOUNCE_TIMEOUT, 6000),
       retryTimeout: parseInteger(process.env.ZERO_BOUNCE_RETRY_TIMEOUT, 8000),
@@ -71,6 +72,7 @@ export const config = {
     // OpenCage (Address Geocoding)
     openCage: {
       apiKey: getOptional('OPENCAGE_API_KEY', ''),
+      baseUrl: getOptional('OPENCAGE_BASE_URL', 'https://api.opencagedata.com'),
       enabled: parseBoolean(process.env.USE_OPENCAGE, false),
       timeout: parseInteger(process.env.OPENCAGE_TIMEOUT, 5000),
       retryTimeout: parseInteger(process.env.OPENCAGE_RETRY_TIMEOUT, 7000),
@@ -90,6 +92,7 @@ export const config = {
   clients: {
     apiKeyHeader: getOptional('API_KEY_HEADER', 'X-API-Key'),
     defaultQuota: parseInteger(process.env.DEFAULT_QUOTA, 1000),
+    defaultClientId: getOptional('DEFAULT_CLIENT_ID', '0001'),
     
     // Get client API keys from environment
     getAll: () => {
@@ -142,7 +145,8 @@ export const config = {
   
   // Monitoring
   monitoring: {
-    enabled: parseBoolean(process.env.ENABLE_METRICS, true),
+    enabled: parseBoolean(process.env.ENABLE_METRICS, false), // Disabled for Vercel
+    persistMetrics: parseBoolean(process.env.PERSIST_METRICS, false),
     metricsPort: parseInteger(process.env.METRICS_PORT, 9090),
     healthCheckPath: '/api/health',
     readinessPath: '/api/ready',
@@ -159,6 +163,9 @@ export const config = {
     retryBackoffMax: parseInteger(process.env.QUEUE_RETRY_BACKOFF_MAX, 120), // minutes
     completedRetentionDays: parseInteger(process.env.QUEUE_COMPLETED_RETENTION_DAYS, 30),
     batchSize: parseInteger(process.env.QUEUE_BATCH_SIZE, 25),
+    maxConcurrency: parseInteger(process.env.QUEUE_MAX_CONCURRENCY, 5),
+    maxRuntime: parseInteger(process.env.QUEUE_MAX_RUNTIME, 270000), // 4.5 minutes
+    lockTimeout: parseInteger(process.env.QUEUE_LOCK_TIMEOUT, 300000), // 5 minutes
     // Cron job configuration
     cronJobs: {
       processor: {

@@ -12,8 +12,7 @@ import validateRoutes from './api/routes/validate.js';
 import hubspotWebhookRoutes from './api/routes/hubspot-webhook.js';
 import healthRoutes from './api/routes/health.js';
 import adminRoutes from './api/routes/admin.js';
-import cronRoutes from './api/routes/cron.js'; // Added cron routes
-import { setupMetrics } from './monitoring/metrics.js';
+import cronRoutes from './api/routes/cron.js';
 
 // Initialize uncaught error handlers
 setupUncaughtErrorHandlers();
@@ -97,14 +96,17 @@ app.use('/api/validate', validateRoutes);
 app.use('/api/hubspot', hubspotWebhookRoutes);
 app.use('/api/health', healthRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/cron', cronRoutes); // Added cron routes
+app.use('/api/cron', cronRoutes);
 
-// Setup Prometheus metrics if enabled
-// Note: In serverless, metrics need special handling
-if (config.monitoring.enabled && !config.isVercel) {
-  setupMetrics(app);
-  logger.info('Metrics enabled', { port: config.monitoring.metricsPort });
-}
+// Root path handler
+app.get('/', (req, res) => {
+  res.status(200).json({
+    service: 'Unmessy API',
+    version: config.unmessy.version,
+    status: 'online',
+    environment: config.env
+  });
+});
 
 // Apply error handling middleware
 app.use(notFoundHandler);
@@ -180,7 +182,7 @@ if (!config.isVercel) {
         hubspot: config.unmessy.features.hubspotIntegration
       },
       asyncProcessing: config.unmessy.features.asyncProcessing,
-      cronEnabled: !!config.security.cronSecret // Log if cron is configured
+      cronEnabled: !!config.security.cronSecret
     });
   }
   
@@ -199,7 +201,6 @@ if (!config.isVercel) {
   export { app, server, startServer };
 } else {
   // For Vercel serverless environment, just initialize once on cold start
-  // This runs once per serverless instance
   (async () => {
     try {
       logger.info('Initializing serverless instance');
@@ -213,7 +214,7 @@ if (!config.isVercel) {
         environment: config.env,
         region: config.vercelRegion,
         version: config.unmessy.version,
-        cronEnabled: !!config.security.cronSecret // Log if cron is configured
+        cronEnabled: !!config.security.cronSecret
       });
     } catch (error) {
       logger.error('Failed to initialize serverless instance', error);

@@ -1,6 +1,5 @@
 // src/core/logger.js
 import winston from 'winston';
-import DailyRotateFile from 'winston-daily-rotate-file';
 
 const { format } = winston;
 
@@ -54,39 +53,8 @@ const createLogger = () => {
     })
   );
   
-  // File transports for production
-  if (process.env.NODE_ENV === 'production') {
-    // Error logs
-    transports.push(
-      new DailyRotateFile({
-        filename: 'logs/error-%DATE%.log',
-        datePattern: 'YYYY-MM-DD',
-        level: 'error',
-        maxSize: '20m',
-        maxFiles: '14d',
-        format: format.combine(
-          format.timestamp(),
-          format.errors({ stack: true }),
-          structuredFormat
-        )
-      })
-    );
-    
-    // Combined logs
-    transports.push(
-      new DailyRotateFile({
-        filename: 'logs/combined-%DATE%.log',
-        datePattern: 'YYYY-MM-DD',
-        maxSize: '20m',
-        maxFiles: '7d',
-        format: format.combine(
-          format.timestamp(),
-          format.errors({ stack: true }),
-          structuredFormat
-        )
-      })
-    );
-  }
+  // Note: File transports removed for Vercel compatibility
+  // In serverless environments, logs should go to stdout/stderr
   
   return winston.createLogger({
     level: process.env.LOG_LEVEL || 'info',

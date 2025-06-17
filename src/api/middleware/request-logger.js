@@ -1,5 +1,4 @@
 // src/api/middleware/request-logger.js
-import { v4 as uuidv4 } from 'uuid';
 import { Logger, createServiceLogger, sanitizeLogData } from '../../core/logger.js';
 import { config } from '../../core/config.js';
 
@@ -11,7 +10,12 @@ const baseLogger = createServiceLogger('http');
  * @returns {string} UUID v4
  */
 function generateRequestId() {
-  return uuidv4();
+  // Generate a UUID v4 without external dependency
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
 }
 
 /**
@@ -111,15 +115,16 @@ export function requestLogger(options = {}) {
     
     // Create context-aware logger
     const clientInfo = getClientInfo(req);
-    const requestLogger = new Logger({
+    const requestLoggerInstance = new baseLogger.constructor({
       ...clientInfo,
       requestId,
       method: req.method,
-      path: req.path
+      path: req.path,
+      service: 'http'
     });
     
     // Attach logger to request object for use in route handlers
-    req.logger = requestLogger;
+    req.logger = requestLoggerInstance;
     req.requestId = requestId;
     
     // Log request
@@ -146,7 +151,7 @@ export function requestLogger(options = {}) {
       logData.body = safeStringify(req.body, bodyMaxLength);
     }
     
-    requestLogger.info('Request received', logData);
+    requestLoggerInstance.info('Request received', logData);
     
     // Intercept response to log when finished
     const originalEnd = res.end;
@@ -170,7 +175,7 @@ export function requestLogger(options = {}) {
                       res.statusCode >= 400 ? 'warn' : 
                       'info';
       
-      requestLogger[logLevel]('Response sent', responseLogData);
+      requestLoggerInstance[logLevel]('Response sent', responseLogData);
       
       // Call original end method
       originalEnd.apply(res, args);

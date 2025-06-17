@@ -83,7 +83,7 @@ router.get('/queue-processor',
     try {
       logger.info('Starting scheduled queue operations', { operations });
       
-      // Import the queue worker modules
+      // Import the queue worker modules dynamically
       const queueProcessor = await import('../../services/workers/queue-processor.js');
       const queueMonitor = await import('../../services/workers/queue-monitor.js');
       
