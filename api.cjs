@@ -1,10 +1,6 @@
-// api.js - Vercel entry point (CommonJS)
-// This file uses CommonJS to import the ES module app
+// api.cjs - Vercel entry point (CommonJS)
 
 module.exports = async (req, res) => {
-  // Dynamically import the ES module
-  const { default: app } = await import('./src/api/index.js');
-  
-  // Execute the Express app
+  const { default: app } = await import('./src/api/vercel.js');
   return app(req, res);
 };
