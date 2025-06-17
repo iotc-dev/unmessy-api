@@ -511,3 +511,4 @@ const hubspotService = new HubSpotService();
 
 // Export both the instance and the class
 export { hubspotService, HubSpotService };
+export default hubspotService;
