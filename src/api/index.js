@@ -1,4 +1,4 @@
-// src/index.js
+// src/api/index.js
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';

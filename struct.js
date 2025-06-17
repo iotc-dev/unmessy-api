@@ -1,6 +1,7 @@
 unmessy api{
     src{
         api{
+            index.js
             middleware{
                 auth.js
                 error-handler.js
@@ -63,7 +64,7 @@ unmessy api{
             queue-monitor.js
             queue-processor.js
         }
-        index.js
+        
     }
     package-Lock.json
     package.json
