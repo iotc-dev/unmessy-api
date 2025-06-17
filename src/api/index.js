@@ -4,15 +4,15 @@ import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
 import { createServer } from 'http';
-import { config, validateConfig } from './core/config.js';
-import logger, { requestLogger, correlationIdMiddleware } from './core/logger.js';
-import db from './core/db.js';
-import { errorHandler, notFoundHandler, setupUncaughtErrorHandlers } from './api/middleware/error-handler.js';
-import validateRoutes from './api/routes/validate.js';
-import hubspotWebhookRoutes from './api/routes/hubspot-webhook.js';
-import healthRoutes from './api/routes/health.js';
-import adminRoutes from './api/routes/admin.js';
-import cronRoutes from './api/routes/cron.js';
+import { config, validateConfig } from '../core/config.js';
+import logger, { requestLogger, correlationIdMiddleware } from '../core/logger.js';
+import db from '../core/db.js';
+import { errorHandler, notFoundHandler, setupUncaughtErrorHandlers } from './middleware/error-handler.js';
+import validateRoutes from './routes/validate.js';
+import hubspotWebhookRoutes from './routes/hubspot-webhook.js';
+import healthRoutes from './routes/health.js';
+import adminRoutes from './routes/admin.js';
+import cronRoutes from './routes/cron.js';
 
 // Initialize uncaught error handlers
 setupUncaughtErrorHandlers();
