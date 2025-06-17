@@ -1,563 +1,346 @@
 // src/core/db.js
 import { createClient } from '@supabase/supabase-js';
-import pg from 'pg';
-import { DatabaseError, DatabaseConnectionError, DatabaseTimeoutError } from './errors.js';
+import { config } from './config.js';
 import { createServiceLogger } from './logger.js';
 
+// Create logger instance
 const logger = createServiceLogger('database');
-const { Pool } = pg;
 
-class DatabaseManager {
-  constructor() {
-    this.supabase = null;
-    this.pool = null;
-    this.config = this.loadConfig();
-    this.isInitialized = false;
-    this.connectionAttempts = 0;
-    this.maxConnectionAttempts = 3;
-  }
+// Connection pool management
+let supabaseClient = null;
+let isInitialized = false;
+let lastUsedTimestamp = Date.now();
 
-  loadConfig() {
-    const config = {
-      supabase: {
-        url: process.env.SUPABASE_URL,
-        key: process.env.SUPABASE_SERVICE_ROLE_KEY,
-        options: {
-          auth: {
-            persistSession: false,
-            autoRefreshToken: false
-          },
-          db: {
-            schema: 'public'
-          },
-          global: {
-            headers: {
-              'X-Client-Info': 'unmessy-api'
-            }
+/**
+ * Create a new Supabase client with optimized settings
+ * @returns {Object} Supabase client
+ */
+const createConnection = () => {
+  try {
+    logger.debug('Creating new Supabase client');
+    
+    const client = createClient(
+      config.database.url,
+      config.database.key,
+      {
+        auth: {
+          persistSession: false // Don't persist session in serverless environment
+        },
+        realtime: {
+          enabled: false // Disable realtime subscription to reduce connection overhead
+        },
+        db: {
+          schema: 'public'
+        },
+        global: {
+          // Adjust fetch options for better timeout handling in serverless
+          fetch: (url, options) => {
+            return fetch(url, {
+              ...options,
+              signal: AbortSignal.timeout(config.database.connectionTimeoutMs)
+            });
           }
         }
-      },
-      postgres: {
-        connectionString: process.env.DATABASE_URL,
-        max: parseInt(process.env.DB_POOL_SIZE || '20'),
-        idleTimeoutMillis: parseInt(process.env.DB_IDLE_TIMEOUT || '30000'),
-        connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT || '10000'),
-        statement_timeout: parseInt(process.env.DB_STATEMENT_TIMEOUT || '30000'),
-        query_timeout: parseInt(process.env.DB_QUERY_TIMEOUT || '30000'),
-        application_name: 'unmessy-api'
       }
-    };
-
-    // Validate configuration
-    if (!config.supabase.url || !config.supabase.key) {
-      throw new DatabaseError('Missing database configuration');
-    }
-
-    return config;
-  }
-
-  async initialize() {
-    if (this.isInitialized) {
-      return;
-    }
-
-    try {
-      logger.info('Initializing database connections');
-
-      // Initialize Supabase client
-      this.supabase = createClient(
-        this.config.supabase.url,
-        this.config.supabase.key,
-        this.config.supabase.options
-      );
-
-      // Initialize PostgreSQL connection pool if direct connection string is available
-      if (this.config.postgres.connectionString) {
-        this.pool = new Pool(this.config.postgres);
-        
-        // Test the connection
-        await this.testConnection();
-        
-        // Set up error handlers
-        this.pool.on('error', (err) => {
-          logger.error('Unexpected pool error', err);
-        });
-
-        this.pool.on('connect', (client) => {
-          logger.debug('New client connected to pool');
-          // Set statement timeout for each client
-          client.query(`SET statement_timeout = ${this.config.postgres.statement_timeout}`);
-        });
-      }
-
-      this.isInitialized = true;
-      logger.info('Database connections initialized successfully');
-    } catch (error) {
-      logger.error('Failed to initialize database', error);
-      throw new DatabaseConnectionError(error);
-    }
-  }
-
-  async testConnection() {
-    try {
-      if (this.pool) {
-        const result = await this.pool.query('SELECT NOW()');
-        logger.debug('PostgreSQL connection test successful', { 
-          timestamp: result.rows[0].now 
-        });
-      }
-
-      // Test Supabase connection
-      const { data, error } = await this.supabase
-        .from('clients')
-        .select('count')
-        .limit(1);
-
-      if (error) throw error;
-      
-      logger.debug('Supabase connection test successful');
-      return true;
-    } catch (error) {
-      logger.error('Database connection test failed', error);
-      throw new DatabaseConnectionError(error);
-    }
-  }
-
-  // Get a client from the pool for transactions
-  async getClient() {
-    if (!this.pool) {
-      throw new DatabaseError('Direct PostgreSQL connection not available');
-    }
-    return this.pool.connect();
-  }
-
-  // Execute a query with retry logic
-  async query(text, params, options = {}) {
-    const { 
-      retries = 2, 
-      timeout = this.config.postgres.query_timeout 
-    } = options;
-
-    for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const start = Date.now();
-        
-        let result;
-        if (this.pool) {
-          // Use direct PostgreSQL connection
-          result = await this.pool.query({
-            text,
-            values: params,
-            query_timeout: timeout
-          });
-        } else {
-          // Fallback to Supabase RPC or raw query
-          throw new DatabaseError('Direct query not supported without PostgreSQL pool');
-        }
-
-        const duration = Date.now() - start;
-        logger.debug('Query executed successfully', {
-          query: text.substring(0, 100),
-          duration,
-          rowCount: result.rowCount
-        });
-
-        return result;
-      } catch (error) {
-        const isLastAttempt = attempt === retries;
-        
-        if (isLastAttempt || !this.isRetryableError(error)) {
-          logger.error('Query failed', error, {
-            query: text.substring(0, 100),
-            attempt: attempt + 1,
-            retries
-          });
-          throw new DatabaseError(`Query failed: ${error.message}`, 'query', error);
-        }
-
-        logger.warn('Query failed, retrying', {
-          attempt: attempt + 1,
-          error: error.message
-        });
-
-        // Wait before retry with exponential backoff
-        await this.sleep(Math.pow(2, attempt) * 100);
-      }
-    }
-  }
-
-  // Transaction support
-  async transaction(callback) {
-    const client = await this.getClient();
+    );
     
-    try {
-      await client.query('BEGIN');
-      const result = await callback(client);
-      await client.query('COMMIT');
-      return result;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
+    return client;
+  } catch (error) {
+    logger.error('Failed to create database connection', error);
+    throw error;
+  }
+};
+
+/**
+ * Get or create database connection
+ * Optimized for both serverless and traditional environments
+ * @returns {Object} Supabase client
+ */
+const getConnection = () => {
+  // If in serverless mode, check if connection is stale
+  if (config.isVercel) {
+    // Create new connection if needed
+    if (!supabaseClient || (Date.now() - lastUsedTimestamp > 10000)) {
+      if (supabaseClient) {
+        logger.debug('Creating new database connection (previous connection stale)');
+      }
+      supabaseClient = createConnection();
+    }
+  } else {
+    // In traditional mode, maintain a persistent connection
+    if (!supabaseClient) {
+      supabaseClient = createConnection();
     }
   }
+  
+  lastUsedTimestamp = Date.now();
+  return supabaseClient;
+};
 
-  // Validation-specific methods
-
-  // Check if email exists in validation cache
-  async getEmailValidation(email) {
-    try {
-      const { data, error } = await this.supabase
-        .from('email_validations')
-        .select('*')
-        .eq('email', email)
-        .single();
-
-      if (error && error.code !== 'PGRST116') {
+/**
+ * Database interface with connection management
+ */
+export const db = {
+  /**
+   * Initialize database connection
+   * @returns {Promise<boolean>} Success status
+   */
+  initialize: async () => {
+    if (!isInitialized) {
+      logger.info('Initializing database connection');
+      
+      try {
+        // Create initial connection
+        supabaseClient = createConnection();
+        
+        // Test connection with a simple query
+        const { data, error } = await supabaseClient
+          .from('clients')
+          .select('id')
+          .limit(1);
+          
+        if (error) throw error;
+        
+        isInitialized = true;
+        logger.info('Database connection successful');
+      } catch (error) {
+        logger.error('Database initialization failed', error);
         throw error;
       }
-
-      return data;
-    } catch (error) {
-      logger.error('Failed to get email validation', error, { email });
-      throw new DatabaseError('Failed to retrieve email validation', 'select', error);
     }
-  }
-
-  // Save email validation result
-  async saveEmailValidation(validationData) {
-    try {
-      // First, ensure contact exists
-      const { data: contact, error: contactError } = await this.supabase
-        .from('contacts')
-        .insert({})
-        .select('id')
-        .single();
-
-      if (contactError) throw contactError;
-
-      // Save validation
-      const { data, error } = await this.supabase
-        .from('email_validations')
-        .upsert({
-          ...validationData,
-          contact_id: contact.id,
-          updated_at: new Date().toISOString()
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      return data;
-    } catch (error) {
-      logger.error('Failed to save email validation', error);
-      throw new DatabaseError('Failed to save email validation', 'insert', error);
-    }
-  }
-
-  // Get email validation rules
-  async getEmailValidationRules(ruleType = null) {
-    try {
-      let query = this.supabase
-        .from('email_validation_rules')
-        .select('*')
-        .eq('is_active', true);
-
-      if (ruleType) {
-        query = query.eq('rule_type', ruleType);
-      }
-
-      const { data, error } = await query;
-
-      if (error) throw error;
-
-      // Update usage statistics
-      if (data && data.length > 0) {
-        const ruleIds = data.map(r => r.id);
-        await this.supabase
-          .from('email_validation_rules')
-          .update({ 
-            last_used_at: new Date().toISOString(),
-            usage_count: this.supabase.sql`usage_count + 1`
-          })
-          .in('id', ruleIds);
-      }
-
-      return data;
-    } catch (error) {
-      logger.error('Failed to get email validation rules', error, { ruleType });
-      throw new DatabaseError('Failed to retrieve validation rules', 'select', error);
-    }
-  }
-
-  // Client management methods
-
-  async getClient(clientId) {
-    try {
-      const { data, error } = await this.supabase
-        .from('clients')
-        .select('*')
-        .eq('client_id', parseInt(clientId))
-        .single();
-
-      if (error) throw error;
-
-      return data;
-    } catch (error) {
-      logger.error('Failed to get client', error, { clientId });
-      throw new DatabaseError('Failed to retrieve client', 'select', error);
-    }
-  }
-
-  async validateApiKey(apiKey) {
-    // This would typically be done via environment variables as shown in current implementation
-    // But if API keys were stored in DB, it would look like this:
-    try {
-      const { data, error } = await this.supabase
-        .from('api_keys')
-        .select('client_id, active')
-        .eq('key_hash', this.hashApiKey(apiKey))
-        .single();
-
-      if (error || !data || !data.active) {
-        return { valid: false };
-      }
-
-      return { valid: true, clientId: data.client_id };
-    } catch (error) {
-      logger.error('Failed to validate API key', error);
-      return { valid: false };
-    }
-  }
-
-  // Rate limiting methods using atomic operations
-
-  async checkRateLimit(clientId, validationType) {
-    try {
-      const columnMap = {
-        email: 'remaining_email',
-        name: 'remaining_name',
-        phone: 'remaining_phone',
-        address: 'remaining_address'
-      };
-
-      const column = columnMap[validationType];
-      if (!column) {
-        throw new Error(`Invalid validation type: ${validationType}`);
-      }
-
-      const { data, error } = await this.supabase
-        .from('clients')
-        .select(`${column}, daily_${validationType}_limit, active`)
-        .eq('client_id', parseInt(clientId))
-        .single();
-
-      if (error) throw error;
-
-      if (!data.active) {
-        return { allowed: false, reason: 'inactive' };
-      }
-
-      return {
-        allowed: data[column] > 0,
-        remaining: data[column],
-        limit: data[`daily_${validationType}_limit`]
-      };
-    } catch (error) {
-      logger.error('Failed to check rate limit', error, { clientId, validationType });
-      throw new DatabaseError('Failed to check rate limit', 'select', error);
-    }
-  }
-
-  async decrementRateLimit(clientId, validationType) {
-    try {
-      // Use stored procedure for atomic decrement
-      const { data, error } = await this.supabase
-        .rpc('decrement_validation_count', {
-          p_client_id: clientId,
-          p_validation_type: validationType
-        });
-
-      if (error) throw error;
-
-      return data; // Returns remaining count or -1 if failed
-    } catch (error) {
-      logger.error('Failed to decrement rate limit', error, { clientId, validationType });
-      throw new DatabaseError('Failed to update rate limit', 'update', error);
-    }
-  }
-
-  // Queue management methods
-
-  async enqueueWebhookEvent(eventData) {
-    try {
-      const { data, error } = await this.supabase
-        .from('hubspot_webhook_queue')
-        .insert(eventData)
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      logger.info('Webhook event enqueued', {
-        eventId: data.event_id,
-        eventType: data.event_type
-      });
-
-      return data;
-    } catch (error) {
-      logger.error('Failed to enqueue webhook event', error);
-      throw new DatabaseError('Failed to enqueue event', 'insert', error);
-    }
-  }
-
-  async getQueuedEvents(limit = 10) {
-    try {
-      const { data, error } = await this.supabase
-        .from('hubspot_webhook_queue')
-        .select('*')
-        .eq('status', 'pending')
-        .lt('attempts', 3)
-        .order('created_at', { ascending: true })
-        .limit(limit);
-
-      if (error) throw error;
-
-      return data || [];
-    } catch (error) {
-      logger.error('Failed to get queued events', error);
-      throw new DatabaseError('Failed to retrieve queue', 'select', error);
-    }
-  }
-
-  async updateQueueEvent(eventId, updates) {
-    try {
-      const { data, error } = await this.supabase
-        .from('hubspot_webhook_queue')
-        .update(updates)
-        .eq('event_id', eventId)
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      return data;
-    } catch (error) {
-      logger.error('Failed to update queue event', error, { eventId });
-      throw new DatabaseError('Failed to update queue event', 'update', error);
-    }
-  }
-
-  // Metrics and monitoring
-
-  async recordValidationMetric(metricData) {
-    try {
-      await this.supabase.rpc('record_validation_metric', metricData);
-    } catch (error) {
-      // Don't throw - metrics are not critical
-      logger.warn('Failed to record validation metric', { error: error.message });
-    }
-  }
-
-  async logApiRequest(requestData) {
-    try {
-      await this.supabase
-        .from('api_request_logs')
-        .insert(requestData);
-    } catch (error) {
-      // Don't throw - logging is not critical
-      logger.warn('Failed to log API request', { error: error.message });
-    }
-  }
-
-  // Cleanup and maintenance
-
-  async cleanup() {
+    
+    return true;
+  },
+  
+  /**
+   * Clean up database connections
+   * @returns {Promise<boolean>} Success status
+   */
+  cleanup: async () => {
     logger.info('Cleaning up database connections');
     
-    if (this.pool) {
-      await this.pool.end();
+    // Supabase client doesn't have a formal close method,
+    // so we just dereference it to allow garbage collection
+    supabaseClient = null;
+    isInitialized = false;
+    
+    return true;
+  },
+  
+  /**
+   * Get the timestamp of last database usage
+   * @returns {number} Timestamp
+   */
+  getLastUsedTimestamp: () => {
+    return lastUsedTimestamp;
+  },
+  
+  /**
+   * Execute a query function with retry logic
+   * @param {Function} queryFn - Function that takes a Supabase client and executes a query
+   * @param {number} retries - Number of retries on failure
+   * @returns {Promise<any>} Query result
+   */
+  executeWithRetry: async (queryFn, retries = 3) => {
+    let attempts = 0;
+    let lastError = null;
+    
+    while (attempts < retries) {
+      try {
+        const connection = getConnection();
+        const result = await queryFn(connection);
+        return result;
+      } catch (error) {
+        lastError = error;
+        attempts++;
+        
+        // Check if we should retry based on error type
+        const shouldRetry = error.code === 'ECONNRESET' || 
+                           error.code === 'ETIMEDOUT' ||
+                           error.message.includes('connection');
+        
+        // Log retry attempts
+        if (attempts < retries && shouldRetry) {
+          logger.warn(`Database query failed, retrying (${attempts}/${retries})`, {
+            error: error.message,
+            code: error.code
+          });
+          
+          // Exponential backoff with jitter
+          const backoffTime = Math.min(
+            200 * Math.pow(2, attempts) + Math.random() * 100,
+            2000
+          );
+          
+          await new Promise(resolve => setTimeout(resolve, backoffTime));
+        } else if (!shouldRetry) {
+          // Don't retry for non-connection errors
+          logger.error('Database query failed with non-retryable error', error);
+          break;
+        }
+      }
     }
     
-    this.isInitialized = false;
-  }
-
-  // Helper methods
-
-  isRetryableError(error) {
-    const retryableCodes = [
-      'ECONNREFUSED',
-      'ETIMEDOUT',
-      'ENOTFOUND',
-      'ECONNRESET',
-      '57P03', // cannot_connect_now
-      '58000', // system_error
-      '58P01', // undefined_file
-      '40001', // serialization_failure
-      '40P01'  // deadlock_detected
-    ];
-
-    return retryableCodes.includes(error.code) || 
-           error.message.includes('connection') ||
-           error.message.includes('timeout');
-  }
-
-  sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  hashApiKey(apiKey) {
-    // Implement secure hashing for API keys
-    const crypto = require('crypto');
-    return crypto.createHash('sha256').update(apiKey).digest('hex');
-  }
-
-  // Get database statistics
-  async getStats() {
-    const stats = {
-      pool: null,
-      connections: {
-        total: 0,
-        idle: 0,
-        waiting: 0
+    logger.error(`Database query failed after ${attempts} attempts`, lastError);
+    throw lastError;
+  },
+  
+  /**
+   * Execute a SQL query with parameters
+   * @param {string} text - SQL query text or function name for RPC
+   * @param {Array|Object} params - Query parameters
+   * @returns {Promise<Object>} Query result
+   */
+  query: async (text, params = []) => {
+    return db.executeWithRetry(async (supabase) => {
+      const { data, error, count } = await supabase.rpc(text, params);
+      
+      if (error) throw error;
+      
+      return {
+        rows: data || [],
+        rowCount: count || 0
+      };
+    });
+  },
+  
+  /**
+   * Insert data into a table
+   * @param {string} table - Table name
+   * @param {Object|Array} data - Data to insert
+   * @param {Object} options - Insert options
+   * @returns {Promise<Object>} Insert result
+   */
+  insert: async (table, data, options = {}) => {
+    return db.executeWithRetry(async (supabase) => {
+      const query = supabase.from(table).insert(data);
+      
+      // Apply options
+      if (options.returning) {
+        query.select(options.returning === true ? '*' : options.returning);
       }
-    };
-
-    if (this.pool) {
-      stats.pool = {
-        totalCount: this.pool.totalCount,
-        idleCount: this.pool.idleCount,
-        waitingCount: this.pool.waitingCount
+      
+      const { data: result, error } = await query;
+      
+      if (error) throw error;
+      
+      return { rows: result || [] };
+    });
+  },
+  
+  /**
+   * Update data in a table
+   * @param {string} table - Table name
+   * @param {Object} data - Data to update
+   * @param {Object} conditions - Where conditions
+   * @param {Object} options - Update options
+   * @returns {Promise<Object>} Update result
+   */
+  update: async (table, data, conditions, options = {}) => {
+    return db.executeWithRetry(async (supabase) => {
+      let query = supabase.from(table).update(data);
+      
+      // Apply conditions
+      Object.entries(conditions).forEach(([column, value]) => {
+        query = query.eq(column, value);
+      });
+      
+      // Apply options
+      if (options.returning) {
+        query.select(options.returning === true ? '*' : options.returning);
+      }
+      
+      const { data: result, error } = await query;
+      
+      if (error) throw error;
+      
+      return { rows: result || [] };
+    });
+  },
+  
+  /**
+   * Select data from a table
+   * @param {string} table - Table name
+   * @param {Object} conditions - Where conditions
+   * @param {Object} options - Select options
+   * @returns {Promise<Object>} Select result
+   */
+  select: async (table, conditions = {}, options = {}) => {
+    return db.executeWithRetry(async (supabase) => {
+      let query = supabase.from(table).select(options.columns || '*');
+      
+      // Apply conditions
+      Object.entries(conditions).forEach(([column, value]) => {
+        query = query.eq(column, value);
+      });
+      
+      // Apply limits
+      if (options.limit) {
+        query = query.limit(options.limit);
+      }
+      
+      // Apply ordering
+      if (options.order) {
+        const { column, ascending = true } = options.order;
+        query = query.order(column, { ascending });
+      }
+      
+      const { data, error, count } = await query;
+      
+      if (error) throw error;
+      
+      return {
+        rows: data || [],
+        rowCount: count || (data ? data.length : 0)
+      };
+    });
+  },
+  
+  /**
+   * Get database statistics
+   * @returns {Promise<Object>} Database stats
+   */
+  getStats: async () => {
+    try {
+      // For serverless environment, provide limited stats
+      if (config.isVercel) {
+        return {
+          initialized: isInitialized,
+          lastUsed: new Date(lastUsedTimestamp).toISOString(),
+          environment: 'serverless'
+        };
+      }
+      
+      // For traditional environment, query for stats
+      return db.executeWithRetry(async (supabase) => {
+        // This is a simplified example - actual stats would depend on Supabase capabilities
+        const { data, error } = await supabase
+          .from('pg_stat_activity')
+          .select('count');
+          
+        if (error) {
+          logger.warn('Failed to get detailed DB stats', error);
+          return {
+            initialized: isInitialized,
+            connections: 'unknown',
+            environment: 'traditional'
+          };
+        }
+        
+        return {
+          initialized: isInitialized,
+          connections: data?.length || 0,
+          environment: 'traditional'
+        };
+      });
+    } catch (error) {
+      logger.error('Error getting database stats', error);
+      return {
+        initialized: isInitialized,
+        error: error.message
       };
     }
-
-    return stats;
   }
-}
-
-// Create singleton instance
-const db = new DatabaseManager();
-
-// Initialize on first import
-if (process.env.NODE_ENV !== 'test') {
-  db.initialize().catch(error => {
-    logger.error('Failed to initialize database on startup', error);
-    process.exit(1);
-  });
-}
-
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, closing database connections');
-  await db.cleanup();
-});
-
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, closing database connections');
-  await db.cleanup();
-});
+};
 
 export default db;
-export { DatabaseManager };

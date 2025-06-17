@@ -65,60 +65,33 @@ export const config = {
       enabled: parseBoolean(process.env.USE_ZERO_BOUNCE, false),
       timeout: parseInteger(process.env.ZERO_BOUNCE_TIMEOUT, 6000),
       retryTimeout: parseInteger(process.env.ZERO_BOUNCE_RETRY_TIMEOUT, 8000),
-      maxRetries: parseInteger(process.env.ZERO_BOUNCE_MAX_RETRIES, 2),
-      baseUrl: 'https://api.zerobounce.net/v2'
+      maxRetries: parseInteger(process.env.ZERO_BOUNCE_MAX_RETRIES, 3)
     },
     
-    // OpenCage (Address Validation)
+    // OpenCage (Address Geocoding)
     openCage: {
       apiKey: getOptional('OPENCAGE_API_KEY', ''),
       enabled: parseBoolean(process.env.USE_OPENCAGE, false),
       timeout: parseInteger(process.env.OPENCAGE_TIMEOUT, 5000),
-      maxRetries: parseInteger(process.env.OPENCAGE_MAX_RETRIES, 2),
-      baseUrl: 'https://api.opencagedata.com/geocode/v1'
+      retryTimeout: parseInteger(process.env.OPENCAGE_RETRY_TIMEOUT, 7000),
+      maxRetries: parseInteger(process.env.OPENCAGE_MAX_RETRIES, 2)
     },
     
-    // Twilio (Phone Validation)
-    twilio: {
-      accountSid: getOptional('TWILIO_ACCOUNT_SID', ''),
-      authToken: getOptional('TWILIO_AUTH_TOKEN', ''),
-      enabled: parseBoolean(process.env.USE_TWILIO, false),
-      timeout: parseInteger(process.env.TWILIO_TIMEOUT, 5000),
-      maxRetries: parseInteger(process.env.TWILIO_MAX_RETRIES, 2)
-    },
-    
-    // HubSpot
+    // HubSpot Integration
     hubspot: {
-      webhookSecret: getOptional('HUBSPOT_WEBHOOK_SECRET', ''),
-      verifySignature: parseBoolean(process.env.VERIFY_WEBHOOK_SIGNATURE, false),
-      defaultPortalId: getOptional('HUBSPOT_DEFAULT_PORTAL_ID', ''),
-      defaultFormGuid: getOptional('HUBSPOT_DEFAULT_FORM_GUID', '')
+      enabled: parseBoolean(process.env.USE_HUBSPOT, false),
+      timeout: parseInteger(process.env.HUBSPOT_TIMEOUT, 5000),
+      maxRetries: parseInteger(process.env.HUBSPOT_MAX_RETRIES, 3),
+      verifySignature: parseBoolean(process.env.HUBSPOT_VERIFY_SIGNATURE, true)
     }
-  },
-  
-  // Queue Configuration
-  queue: {
-    batchSize: parseInteger(process.env.QUEUE_BATCH_SIZE, 10),
-    maxRetries: parseInteger(process.env.QUEUE_MAX_RETRIES, 3),
-    processInterval: parseInteger(process.env.QUEUE_PROCESS_INTERVAL, 60000), // 1 minute
-    maxRuntime: parseInteger(process.env.QUEUE_MAX_RUNTIME, 55000), // 55 seconds
-    lockTimeout: parseInteger(process.env.QUEUE_LOCK_TIMEOUT, 120000) // 2 minutes
-  },
-  
-  // Rate Limiting
-  rateLimit: {
-    windowMs: parseInteger(process.env.RATE_LIMIT_WINDOW, 60000), // 1 minute
-    maxRequests: parseInteger(process.env.RATE_LIMIT_MAX, 100),
-    skipSuccessfulRequests: parseBoolean(process.env.RATE_LIMIT_SKIP_SUCCESSFUL, false),
-    skipFailedRequests: parseBoolean(process.env.RATE_LIMIT_SKIP_FAILED, false)
   },
   
   // Client Configuration
   clients: {
-    defaultClientId: getOptional('DEFAULT_CLIENT_ID', '0001'),
-    apiKeyHeader: 'X-API-Key', // Header name for API key
-    // Load client configurations from environment
-    // Format: CLIENT_1_KEY, CLIENT_1_ID, CLIENT_2_KEY, CLIENT_2_ID, etc.
+    apiKeyHeader: getOptional('API_KEY_HEADER', 'X-API-Key'),
+    defaultQuota: parseInteger(process.env.DEFAULT_QUOTA, 1000),
+    
+    // Get client API keys from environment
     getAll: () => {
       const clients = new Map();
       const envKeys = Object.keys(process.env);
@@ -154,7 +127,9 @@ export const config = {
     },
     cronSecret: getOptional('CRON_SECRET', ''),
     adminSecret: getOptional('ADMIN_SECRET', ''),
-    jwtSecret: getOptional('JWT_SECRET', 'default-secret-change-in-production')
+    jwtSecret: getOptional('JWT_SECRET', 'default-secret-change-in-production'),
+    // Add IP allowlist for cron jobs if needed
+    cronAllowedIPs: getOptional('CRON_ALLOWED_IPS', '').split(',').filter(ip => ip.trim().length > 0)
   },
   
   // Logging
@@ -174,9 +149,35 @@ export const config = {
     livenessPath: '/api/live'
   },
   
+  // Queue Configuration
+  queue: {
+    pendingThreshold: parseInteger(process.env.QUEUE_PENDING_THRESHOLD, 100),
+    stalledThresholdMinutes: parseInteger(process.env.QUEUE_STALLED_THRESHOLD_MINUTES, 30),
+    stalledThresholdHours: parseInteger(process.env.QUEUE_STALLED_THRESHOLD_HOURS, 1),
+    maxRetries: parseInteger(process.env.QUEUE_MAX_RETRIES, 3),
+    retryBackoffBase: parseInteger(process.env.QUEUE_RETRY_BACKOFF_BASE, 5), // minutes
+    retryBackoffMax: parseInteger(process.env.QUEUE_RETRY_BACKOFF_MAX, 120), // minutes
+    completedRetentionDays: parseInteger(process.env.QUEUE_COMPLETED_RETENTION_DAYS, 30),
+    batchSize: parseInteger(process.env.QUEUE_BATCH_SIZE, 25),
+    // Cron job configuration
+    cronJobs: {
+      processor: {
+        schedule: getOptional('CRON_PROCESSOR_SCHEDULE', '*/5 * * * *'), // Every 5 minutes
+        operations: getOptional('CRON_PROCESSOR_OPS', 'process,monitor,reset-stalled').split(',')
+      },
+      cleanup: {
+        schedule: getOptional('CRON_CLEANUP_SCHEDULE', '0 0 * * 0'), // Every Sunday at midnight
+        operations: getOptional('CRON_CLEANUP_OPS', 'cleanup').split(',')
+      },
+      resetLimits: {
+        schedule: getOptional('CRON_RESET_LIMITS_SCHEDULE', '0 0 * * *') // Every day at midnight
+      }
+    }
+  },
+  
   // Unmessy Specific
   unmessy: {
-    version: getOptional('UNMESSY_VERSION', '200'),
+    version: getOptional('UNMESSY_VERSION', '2.0.0'),
     supportEmail: getOptional('SUPPORT_EMAIL', 'support@unmessy.com'),
     maxValidationTimeout: parseInteger(process.env.MAX_VALIDATION_TIMEOUT, 30000), // 30 seconds
     enableCache: parseBoolean(process.env.ENABLE_CACHE, true),
@@ -246,6 +247,11 @@ export function validateConfig() {
     }
   }
   
+  // Check cron configuration if async processing is enabled
+  if (config.unmessy.features.asyncProcessing && !config.security.cronSecret) {
+    errors.push('CRON_SECRET is required when async processing is enabled');
+  }
+  
   // Log configuration status
   console.log('Configuration loaded:', {
     environment: config.env,
@@ -256,9 +262,10 @@ export function validateConfig() {
     servicesEnabled: {
       zeroBounce: config.services.zeroBounce.enabled,
       openCage: config.services.openCage.enabled,
-      twilio: config.services.twilio.enabled
+      hubspot: config.unmessy.features.hubspotIntegration
     },
-    featuresEnabled: config.unmessy.features
+    featuresEnabled: config.unmessy.features,
+    cronConfigured: !!config.security.cronSecret
   });
   
   if (errors.length > 0) {
