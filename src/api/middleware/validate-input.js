@@ -1,49 +1,35 @@
 // src/api/middleware/validate-input.js
 import Joi from 'joi';
-import { createServiceLogger } from '../../core/logger.js';
 import { ValidationError } from '../../core/errors.js';
+import { createServiceLogger } from '../../core/logger.js';
 
 // Create logger instance
 const logger = createServiceLogger('validate-input');
 
 /**
- * Creates a validation middleware using Joi schema
+ * Create validation middleware for request data
  * 
- * @param {Object} schema - Joi validation schema with request parts
- * @param {Object} options - Validation options
+ * @param {Object} schema - Joi validation schema object with keys for body, query, params
  * @returns {Function} Express middleware function
  */
-function validateSchema(schema, options = {}) {
-  const {
-    abortEarly = false,
-    stripUnknown = true,
-    allowUnknown = true
-  } = options;
-  
-  // Default Joi options
-  const validationOptions = {
-    abortEarly,
-    stripUnknown,
-    allowUnknown
-  };
-  
+export function validateRequest(schema) {
   return (req, res, next) => {
-    // Parts of the request to validate
-    const validationParts = ['params', 'query', 'body'];
     const validationErrors = [];
     
-    // Validate each part if schema is provided
-    for (const part of validationParts) {
-      if (schema[part]) {
-        const { error, value } = schema[part].validate(
-          req[part],
-          validationOptions
-        );
+    // Validate each part of the request
+    for (const [part, partSchema] of Object.entries(schema)) {
+      const data = req[part];
+      
+      if (partSchema && data !== undefined) {
+        const { error, value } = partSchema.validate(data, {
+          abortEarly: false,
+          stripUnknown: true,
+          convert: true
+        });
         
         if (error) {
-          // Format validation errors
           const errors = error.details.map(detail => ({
-            path: detail.path.join('.'),
+            field: detail.path.join('.'),
             message: detail.message,
             type: detail.type
           }));
@@ -95,7 +81,7 @@ export const schemas = {
       name: Joi.string().min(1).max(100),
       first_name: Joi.string().min(1).max(50),
       last_name: Joi.string().min(1).max(50)
-    }).or('name', ['first_name', 'last_name'])
+    }).or('name', 'first_name', 'last_name')  // Fixed: removed array syntax
       .messages({
         'object.missing': 'Either name or first_name/last_name is required'
       })
@@ -138,20 +124,43 @@ export const schemas = {
       // At least one address component must be provided
       const hasFullAddress = !!value.address;
       const hasAddressLine = !!value.address_line_1;
-      const hasComponents = !!(value.house_number || value.street_name);
+      const hasComponents = !!(value.house_number || value.street_name || value.city);
       
       if (!hasFullAddress && !hasAddressLine && !hasComponents) {
-        return helpers.error('object.missing');
+        return helpers.error('custom.noAddress');
       }
       
       return value;
     })
     .messages({
-      'object.missing': 'At least one address component is required'
+      'custom.noAddress': 'At least one address field must be provided'
     })
   },
   
-  // Pagination schema
+  // Batch validation schema
+  batch: {
+    body: Joi.object({
+      items: Joi.array()
+        .items(Joi.any())
+        .min(1)
+        .max(100)
+        .required()
+        .messages({
+          'array.min': 'At least one item is required',
+          'array.max': 'Maximum 100 items allowed per batch',
+          'any.required': 'Items array is required'
+        }),
+      type: Joi.string()
+        .valid('email', 'name', 'phone', 'address')
+        .required()
+        .messages({
+          'any.only': 'Type must be one of: email, name, phone, address',
+          'any.required': 'Type is required'
+        })
+    })
+  },
+  
+  // Pagination schema for list endpoints
   pagination: {
     query: Joi.object({
       page: Joi.number().integer().min(1).default(1),
@@ -162,47 +171,33 @@ export const schemas = {
   // ID parameter schema
   id: {
     params: Joi.object({
-      id: Joi.string().required()
+      id: Joi.alternatives().try(
+        Joi.number().integer().positive(),
+        Joi.string().uuid()
+      ).required()
         .messages({
-          'string.empty': 'ID is required',
-          'any.required': 'ID is required'
+          'any.required': 'ID parameter is required'
         })
     })
-  }
+  },
+  
+  // Custom validation schema
+  custom: (schemaDefinition) => schemaDefinition
 };
 
 /**
- * Create validator middleware for specific validation types
+ * Convenience middleware creators
  */
 export const validate = {
-  // Email validation middleware
-  email: (customSchema) => validateSchema(customSchema || schemas.email),
-  
-  // Name validation middleware
-  name: (customSchema) => validateSchema(customSchema || schemas.name),
-  
-  // Phone validation middleware
-  phone: (customSchema) => validateSchema(customSchema || schemas.phone),
-  
-  // Address validation middleware
-  address: (customSchema) => validateSchema(customSchema || schemas.address),
-  
-  // Custom schema validation middleware
-  custom: (schema) => validateSchema(schema),
-  
-  // Pagination validation middleware
-  pagination: (customSchema) => validateSchema(customSchema || schemas.pagination),
-  
-  // ID parameter validation middleware
-  id: (customSchema) => validateSchema(customSchema || schemas.id)
+  email: () => validateRequest(schemas.email),
+  name: () => validateRequest(schemas.name),
+  phone: () => validateRequest(schemas.phone),
+  address: () => validateRequest(schemas.address),
+  batch: () => validateRequest(schemas.batch),
+  pagination: () => validateRequest(schemas.pagination),
+  id: () => validateRequest(schemas.id),
+  custom: (schema) => validateRequest(schema)
 };
 
-// Export validation middleware factory and schemas
-export { validateSchema };
-
-// Export default
-export default {
-  validate,
-  schemas,
-  validateSchema
-};
+// Export both named and default
+export default validate;
