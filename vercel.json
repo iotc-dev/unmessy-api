@@ -2,14 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "api.js",
+      "src": "api.cjs",
       "use": "@vercel/node"
     }
   ],
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "/api.js"
+      "dest": "/api.cjs"
     }
   ],
   "regions": ["syd1"]
