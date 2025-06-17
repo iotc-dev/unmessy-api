@@ -12,6 +12,22 @@ import { NotFoundError, AuthorizationError } from '../../core/errors.js';
 
 const router = express.Router();
 
+// Client schema for validation - MOVED TO TOP
+const clientSchema = Joi.object({
+  name: Joi.string().required(),
+  active: Joi.boolean().default(true),
+  daily_email_limit: Joi.number().integer().min(1).default(10000),
+  daily_name_limit: Joi.number().integer().min(1).default(10000),
+  daily_phone_limit: Joi.number().integer().min(1).default(10000),
+  daily_address_limit: Joi.number().integer().min(1).default(10000),
+  hubspot_enabled: Joi.boolean().default(false),
+  hubspot_private_key: Joi.string().allow('', null),
+  hubspot_portal_id: Joi.string().allow('', null),
+  hubspot_form_guid: Joi.string().allow('', null),
+  hubspot_webhook_secret: Joi.string().allow('', null),
+  is_admin: Joi.boolean().default(false)
+});
+
 // Apply authentication to all admin routes
 // Require admin privileges
 router.use(authMiddleware({ adminOnly: true }));
@@ -235,11 +251,11 @@ async function getSystemStats() {
   ]);
   
   return {
-    timestamp: new Date().toISOString(),
     clients: clientStats,
     validations: validationStats,
     queue: queueStats,
-    database: dbStats
+    database: dbStats,
+    timestamp: new Date().toISOString()
   };
 }
 
@@ -247,124 +263,114 @@ async function getSystemStats() {
  * Get validation statistics
  */
 async function getValidationStats() {
-  // Query the validation_metrics table for aggregate stats
-  const result = await db.query(`
-    SELECT 
-      validation_type,
-      SUM(total_requests) as total_requests,
-      SUM(successful_validations) as successful,
-      SUM(failed_validations) as failed,
-      ROUND(AVG(avg_response_time_ms), 2) as avg_response_time_ms
-    FROM validation_metrics
-    WHERE date = CURRENT_DATE
-    GROUP BY validation_type
-  `);
-  
-  // Format the results
-  const statsByType = {};
-  let totalRequests = 0;
-  
-  result.rows.forEach(row => {
-    statsByType[row.validation_type] = {
-      requests: parseInt(row.total_requests, 10),
-      successful: parseInt(row.successful, 10),
-      failed: parseInt(row.failed, 10),
-      avgResponseTime: parseFloat(row.avg_response_time_ms)
-    };
+  try {
+    const { rows } = await db.query(`
+      SELECT 
+        SUM(email_count) as total_emails,
+        SUM(name_count) as total_names,
+        SUM(phone_count) as total_phones,
+        SUM(address_count) as total_addresses
+      FROM clients
+    `);
     
-    totalRequests += parseInt(row.total_requests, 10);
-  });
-  
-  return {
-    total: totalRequests,
-    byType: statsByType,
-    period: 'today'
-  };
+    return rows[0];
+  } catch (error) {
+    return {
+      total_emails: 0,
+      total_names: 0,
+      total_phones: 0,
+      total_addresses: 0
+    };
+  }
 }
 
 /**
- * Get metrics data
+ * Get metrics for a specific period and type
  */
 async function getMetrics(period, type) {
-  // Build time range for the query
-  let timeCondition;
+  let timeRange;
+  let groupBy;
+  
   switch (period) {
     case 'hour':
-      timeCondition = `date = CURRENT_DATE AND hour = EXTRACT(HOUR FROM CURRENT_TIMESTAMP)`;
-      break;
-    case 'day':
-      timeCondition = `date = CURRENT_DATE`;
+      timeRange = "date >= NOW() - INTERVAL '1 hour'";
+      groupBy = 'minute';
       break;
     case 'week':
-      timeCondition = `date >= CURRENT_DATE - INTERVAL '7 days'`;
+      timeRange = "date >= NOW() - INTERVAL '7 days'";
+      groupBy = 'day';
       break;
     case 'month':
-      timeCondition = `date >= CURRENT_DATE - INTERVAL '30 days'`;
+      timeRange = "date >= NOW() - INTERVAL '30 days'";
+      groupBy = 'day';
       break;
-    default:
-      timeCondition = `date = CURRENT_DATE`;
+    default: // day
+      timeRange = "date >= NOW() - INTERVAL '24 hours'";
+      groupBy = 'hour';
   }
   
-  // Build type condition
-  const typeCondition = type === 'all' ? '' : `AND validation_type = '${type}'`;
+  const typeFilter = type === 'all' ? '' : `AND validation_type = '${type}'`;
   
-  // Query for metrics
   const query = `
     SELECT 
+      DATE_TRUNC('${groupBy}', date) as period,
       validation_type,
-      date,
-      hour,
-      SUM(total_requests) as total_requests,
-      SUM(successful_validations) as successful_validations,
-      SUM(failed_validations) as failed_validations,
-      ROUND(AVG(avg_response_time_ms), 2) as avg_response_time_ms,
+      SUM(total_requests) as requests,
+      SUM(successful_validations) as successes,
+      SUM(failed_validations) as failures,
+      AVG(avg_response_time_ms) as avg_response_time_ms,
       SUM(timeout_errors) as timeout_errors,
       SUM(external_api_errors) as external_api_errors
     FROM validation_metrics
-    WHERE ${timeCondition} ${typeCondition}
-    GROUP BY validation_type, date, hour
-    ORDER BY date DESC, hour DESC
+    WHERE ${timeRange} ${typeFilter}
+    GROUP BY period, validation_type
+    ORDER BY period DESC
   `;
   
-  const result = await db.query(query);
+  const { rows } = await db.query(query);
   
-  // Format results based on period
-  let formattedResults;
+  // Format results
+  const formattedResults = [];
   
-  if (period === 'hour') {
-    // Hourly breakdown
-    formattedResults = result.rows.map(row => ({
-      type: row.validation_type,
-      date: row.date,
-      hour: row.hour,
-      requests: parseInt(row.total_requests, 10),
-      successful: parseInt(row.successful_validations, 10),
-      failed: parseInt(row.failed_validations, 10),
-      avgResponseTime: parseFloat(row.avg_response_time_ms),
-      errors: {
-        timeout: parseInt(row.timeout_errors, 10),
-        externalApi: parseInt(row.external_api_errors, 10)
-      }
-    }));
-  } else {
-    // Daily aggregation
-    const dailyData = {};
+  if (type === 'all') {
+    // Group by period
+    const periodData = {};
     
-    result.rows.forEach(row => {
-      const dateKey = row.date.toISOString().split('T')[0];
-      
-      if (!dailyData[dateKey]) {
-        dailyData[dateKey] = {
-          date: dateKey,
-          types: {}
+    rows.forEach(row => {
+      const periodKey = row.period.toISOString();
+      if (!periodData[periodKey]) {
+        periodData[periodKey] = {
+          period: periodKey,
+          email: { requests: 0, successes: 0, failures: 0, avgResponseTime: 0 },
+          name: { requests: 0, successes: 0, failures: 0, avgResponseTime: 0 },
+          phone: { requests: 0, successes: 0, failures: 0, avgResponseTime: 0 },
+          address: { requests: 0, successes: 0, failures: 0, avgResponseTime: 0 }
         };
       }
       
-      if (!dailyData[dateKey].types[row.validation_type]) {
-        dailyData[dateKey].types[row.validation_type] = {
+      if (row.validation_type in periodData[periodKey]) {
+        periodData[periodKey][row.validation_type] = {
+          requests: parseInt(row.requests, 10),
+          successes: parseInt(row.successes, 10),
+          failures: parseInt(row.failures, 10),
+          avgResponseTime: parseFloat(row.avg_response_time_ms)
+        };
+      }
+    });
+    
+    formattedResults = Object.values(periodData);
+  } else {
+    // Single type
+    const dailyData = {};
+    
+    rows.forEach(row => {
+      const hourKey = row.period.toISOString();
+      if (!dailyData[hourKey]) {
+        dailyData[hourKey] = {
+          period: hourKey,
           requests: 0,
-          successful: 0,
-          failed: 0,
+          successes: 0,
+          failures: 0,
           avgResponseTime: 0,
           hours: 0,
           errors: {
@@ -374,10 +380,10 @@ async function getMetrics(period, type) {
         };
       }
       
-      const typeData = dailyData[dateKey].types[row.validation_type];
-      typeData.requests += parseInt(row.total_requests, 10);
-      typeData.successful += parseInt(row.successful_validations, 10);
-      typeData.failed += parseInt(row.failed_validations, 10);
+      const typeData = dailyData[hourKey];
+      typeData.requests += parseInt(row.requests, 10);
+      typeData.successes += parseInt(row.successes, 10);
+      typeData.failures += parseInt(row.failures, 10);
       typeData.avgResponseTime = (typeData.avgResponseTime * typeData.hours + parseFloat(row.avg_response_time_ms)) / (typeData.hours + 1);
       typeData.hours += 1;
       typeData.errors.timeout += parseInt(row.timeout_errors, 10);
@@ -393,21 +399,5 @@ async function getMetrics(period, type) {
     data: formattedResults
   };
 }
-
-// Client schema for validation
-const clientSchema = Joi.object({
-  name: Joi.string().required(),
-  active: Joi.boolean().default(true),
-  daily_email_limit: Joi.number().integer().min(1).default(10000),
-  daily_name_limit: Joi.number().integer().min(1).default(10000),
-  daily_phone_limit: Joi.number().integer().min(1).default(10000),
-  daily_address_limit: Joi.number().integer().min(1).default(10000),
-  hubspot_enabled: Joi.boolean().default(false),
-  hubspot_private_key: Joi.string().allow('', null),
-  hubspot_portal_id: Joi.string().allow('', null),
-  hubspot_form_guid: Joi.string().allow('', null),
-  hubspot_webhook_secret: Joi.string().allow('', null),
-  is_admin: Joi.boolean().default(false)
-});
 
 export default router;
