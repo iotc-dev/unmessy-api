@@ -1,16 +1,21 @@
 {
   "version": 2,
+  "builds": [
+    {
+      "src": "src/index.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/src/index.js"
+    }
+  ],
   "functions": {
     "src/index.js": {
-      "runtime": "nodejs18.x",
-      "memory": 1024,
       "maxDuration": 60
     }
   },
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/src/index.js"
-    }
-  ]
+  "regions": ["syd1"]
 }
