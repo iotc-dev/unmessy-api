@@ -1,10 +1,10 @@
 // src/services/external/zerobounce.js
+import CircuitBreaker from 'opossum';
 import { config } from '../../core/config.js';
 import { createServiceLogger } from '../../core/logger.js';
 import { 
   ExternalServiceError,
   ZeroBounceError,
-  CircuitBreaker,
   ErrorRecovery,
   TimeoutError
 } from '../../core/errors.js';
@@ -20,13 +20,19 @@ class ZeroBounceService {
     this.retryTimeout = config.services.zeroBounce.retryTimeout;
     this.maxRetries = config.services.zeroBounce.maxRetries;
     
-    // Initialize circuit breaker
-    this.circuitBreaker = new CircuitBreaker({
+    // Initialize circuit breaker with Opossum
+    this.circuitBreaker = new CircuitBreaker(this.executeRequest.bind(this), {
       name: 'ZeroBounce',
-      failureThreshold: 5,
-      resetTimeout: 60000, // 1 minute
-      monitoringPeriod: 10000 // 10 seconds
+      timeout: 10000, // Time in ms before a request is considered failed
+      errorThresholdPercentage: 50, // When 50% of requests fail, trip the circuit
+      resetTimeout: 60000, // Wait time before trying to close the circuit
+      volumeThreshold: 5, // Minimum number of requests needed before tripping circuit
+      rollingCountTimeout: 10000, // Time window for error rate calculation
+      rollingCountBuckets: 10 // Number of buckets for stats tracking
     });
+    
+    // Add event listeners
+    this.setupCircuitBreakerEvents();
     
     // Cache for API credits (avoid repeated calls)
     this.creditsCache = {
@@ -39,6 +45,33 @@ class ZeroBounceService {
     this.responseCache = new Map();
     this.responseCacheTTL = 60 * 1000; // 1 minute
     this.maxCacheSize = 1000;
+  }
+  
+  // Setup circuit breaker event handlers
+  setupCircuitBreakerEvents() {
+    this.circuitBreaker.on('open', () => {
+      this.logger.warn('ZeroBounce circuit breaker opened');
+    });
+    
+    this.circuitBreaker.on('halfOpen', () => {
+      this.logger.info('ZeroBounce circuit breaker half-open, testing service');
+    });
+    
+    this.circuitBreaker.on('close', () => {
+      this.logger.info('ZeroBounce circuit breaker closed, service recovered');
+    });
+    
+    this.circuitBreaker.on('fallback', (result) => {
+      this.logger.warn('ZeroBounce circuit breaker fallback executed');
+    });
+    
+    this.circuitBreaker.on('timeout', () => {
+      this.logger.warn('ZeroBounce request timed out');
+    });
+    
+    this.circuitBreaker.on('reject', () => {
+      this.logger.warn('ZeroBounce request rejected (circuit open)');
+    });
   }
   
   // Validate email with ZeroBounce
@@ -66,158 +99,206 @@ class ZeroBounceService {
     }
     
     // Execute with circuit breaker
-    return this.circuitBreaker.execute(async () => {
-      try {
-        const result = await ErrorRecovery.withRetry(
-          async (attempt) => {
-            this.logger.debug('Calling ZeroBounce API', { 
-              email, 
-              attempt,
-              timeout: attempt === 1 ? timeout : this.retryTimeout
-            });
-            
-            // Use longer timeout for retries
-            const attemptTimeout = attempt === 1 ? timeout : this.retryTimeout;
-            
-            const response = await this.makeApiCall('/validate', {
-              api_key: this.apiKey,
-              email: email,
-              ip_address: ipAddress
-            }, {
-              timeout: attemptTimeout
-            });
-            
-            return response;
-          },
-          {
-            maxAttempts: this.maxRetries,
-            delay: 1000,
-            backoffMultiplier: 2,
-            onRetry: (error, attempt) => {
-              this.logger.warn('Retrying ZeroBounce validation', {
-                email,
-                attempt,
-                error: error.message
-              });
-            }
+    try {
+      const requestData = {
+        email,
+        ipAddress,
+        timeout
+      };
+      
+      const result = await this.circuitBreaker.fire(requestData);
+      
+      // Cache successful response
+      this.addToResponseCache(email, result);
+      
+      return result;
+    } catch (error) {
+      if (error.name === 'CircuitBreaker:OpenError') {
+        throw new ZeroBounceError('ZeroBounce service is currently unavailable (circuit open)', 503);
+      }
+      
+      if (error.name === 'CircuitBreaker:TimeoutError') {
+        throw new TimeoutError('ZeroBounce', timeout);
+      }
+      
+      if (error instanceof ZeroBounceError || error instanceof TimeoutError) {
+        throw error;
+      }
+      
+      throw new ZeroBounceError(`Email validation failed: ${error.message}`, 500);
+    }
+  }
+  
+  // This is the function that will be wrapped by the circuit breaker
+  async executeRequest(requestData) {
+    const { email, ipAddress, timeout } = requestData;
+    
+    try {
+      return await ErrorRecovery.withRetry(
+        async (attempt) => {
+          this.logger.debug('Calling ZeroBounce API', { 
+            email, 
+            attempt,
+            timeout: attempt === 1 ? timeout : this.retryTimeout
+          });
+          
+          // Use longer timeout for retries
+          const attemptTimeout = attempt === 1 ? timeout : this.retryTimeout;
+          
+          const params = {
+            api_key: this.apiKey,
+            email,
+            ip_address: ipAddress || ''
+          };
+          
+          const url = new URL('/api/validate', this.baseUrl);
+          
+          // Add params to URL
+          Object.keys(params).forEach(key => {
+            url.searchParams.append(key, params[key]);
+          });
+          
+          // Execute API call with timeout
+          const response = await ErrorRecovery.withTimeout(
+            fetch(url.toString()),
+            attemptTimeout,
+            `ZeroBounce validate email: ${email}`
+          );
+          
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new ZeroBounceError(
+              `API error: ${response.status} ${errorText || response.statusText}`,
+              response.status
+            );
           }
-        );
-        
-        // Cache successful response
-        this.addToResponseCache(email, result);
-        
-        return result;
-      } catch (error) {
-        this.logger.error('ZeroBounce validation failed', error, { email });
-        
-        // Transform to appropriate error type
-        if (error instanceof TimeoutError) {
-          throw new ZeroBounceError('Request timeout', 504, error);
-        } else if (error.statusCode === 429) {
-          throw new ZeroBounceError('Rate limit exceeded', 429, error);
-        } else if (error.statusCode === 401) {
-          throw new ZeroBounceError('Invalid API key', 401, error);
-        } else {
-          throw new ZeroBounceError(
-            error.message || 'Validation failed',
-            error.statusCode || 503,
-            error
+          
+          const data = await response.json();
+          
+          if (!data) {
+            throw new ZeroBounceError('Invalid response from ZeroBounce API');
+          }
+          
+          // Format response
+          return this.formatValidationResponse(data, email);
+        },
+        this.maxRetries,
+        500, // Initial delay in ms
+        (error) => {
+          // Only retry on network errors or 5xx errors
+          return (
+            error.message?.includes('network') ||
+            error.statusCode >= 500 ||
+            error instanceof TimeoutError
           );
         }
-      }
-    });
-  }
-  
-  // Get email activity data
-  async getEmailActivity(email) {
-    if (!config.services.zeroBounce.enabled || !this.apiKey) {
-      throw new ZeroBounceError('ZeroBounce service is not available', 503);
+      );
+    } catch (error) {
+      this.logger.error('ZeroBounce validation failed', error, { email });
+      throw error;
     }
-    
-    return this.circuitBreaker.execute(async () => {
-      try {
-        const response = await this.makeApiCall('/activity', {
-          api_key: this.apiKey,
-          email: email
-        });
-        
-        return response;
-      } catch (error) {
-        this.logger.error('Failed to get email activity', error, { email });
-        throw new ZeroBounceError(
-          'Failed to get email activity',
-          error.statusCode || 503,
-          error
-        );
-      }
-    });
   }
   
-  // Get remaining API credits
-  async getCredits() {
+  // Format API response
+  formatValidationResponse(data, email) {
+    // Basic validation status
+    const isValid = data.status === 'valid';
+    
+    return {
+      email,
+      valid: isValid,
+      status: data.status,
+      subStatus: data.sub_status,
+      freeEmail: data.free_email,
+      didYouMean: data.did_you_mean || null,
+      account: data.account || null,
+      domain: data.domain || null,
+      domainAgeDays: data.domain_age_days,
+      smtpProvider: data.smtp_provider || null,
+      mxRecord: data.mx_record || null,
+      mxFound: data.mx_found,
+      firstname: data.firstname || null,
+      lastname: data.lastname || null,
+      gender: data.gender || null,
+      country: data.country || null,
+      region: data.region || null,
+      city: data.city || null,
+      zipcode: data.zipcode || null,
+      processedAt: data.processed_at,
+      source: 'zerobounce',
+      rawResponse: data
+    };
+  }
+  
+  // Check if we have sufficient API credits
+  async checkCredits() {
     // Check cache first
-    if (this.creditsCache.credits !== null && 
-        Date.now() - this.creditsCache.timestamp < this.creditsCache.ttl) {
+    if (
+      this.creditsCache.credits !== null &&
+      Date.now() - this.creditsCache.timestamp < this.creditsCache.ttl
+    ) {
       return this.creditsCache.credits;
-    }
-    
-    if (!this.apiKey) {
-      throw new ZeroBounceError('ZeroBounce API key not configured', 503);
     }
     
     try {
-      const response = await this.makeApiCall('/getcredits', {
-        api_key: this.apiKey
-      }, {
-        timeout: 5000 // Quick timeout for credit check
-      });
+      const url = new URL('/api/getcredits', this.baseUrl);
+      url.searchParams.append('api_key', this.apiKey);
       
-      // Cache the result
-      this.creditsCache = {
-        credits: response.Credits || 0,
-        timestamp: Date.now()
-      };
+      const response = await fetch(url.toString());
       
-      this.logger.info('ZeroBounce credits retrieved', { 
-        credits: response.Credits 
-      });
+      if (!response.ok) {
+        throw new ZeroBounceError(
+          `Failed to get credits: ${response.status} ${response.statusText}`,
+          response.status
+        );
+      }
       
-      return response.Credits;
+      const data = await response.json();
+      
+      if (data && typeof data.Credits === 'number') {
+        // Update cache
+        this.creditsCache.credits = data.Credits;
+        this.creditsCache.timestamp = Date.now();
+        
+        return data.Credits;
+      }
+      
+      throw new ZeroBounceError('Invalid response format for credits check');
     } catch (error) {
-      this.logger.error('Failed to get ZeroBounce credits', error);
-      // Don't throw - return cached value or null
-      return this.creditsCache.credits;
+      this.logger.error('Failed to check ZeroBounce credits', error);
+      
+      // Return cached credits if available
+      if (this.creditsCache.credits !== null) {
+        return this.creditsCache.credits;
+      }
+      
+      throw error;
     }
   }
   
-  // Make API call with timeout and error handling
-  async makeApiCall(endpoint, params, options = {}) {
-    const {
-      method = 'GET',
-      timeout = this.timeout
-    } = options;
+  // API Call Helper
+  async makeApiCall(endpoint, params = {}, method = 'GET', timeout = this.timeout) {
+    const url = new URL(endpoint, this.baseUrl);
     
-    const url = new URL(`${this.baseUrl}${endpoint}`);
+    // Add API key to all requests
+    params.api_key = this.apiKey;
     
-    // Add parameters to URL for GET requests
-    if (method === 'GET' && params) {
-      Object.keys(params).forEach(key => {
-        if (params[key] !== undefined && params[key] !== null) {
-          url.searchParams.append(key, params[key]);
-        }
-      });
-    }
-    
+    // Configure fetch options
     const fetchOptions = {
       method,
       headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Unmessy-API/1.0'
+        'Accept': 'application/json'
       }
     };
     
-    // Add body for POST requests
-    if (method === 'POST' && params) {
+    // Handle different HTTP methods
+    if (method === 'GET') {
+      // Add params to URL for GET requests
+      Object.keys(params).forEach(key => {
+        url.searchParams.append(key, params[key]);
+      });
+    } else {
+      // Add params to body for POST requests
       fetchOptions.headers['Content-Type'] = 'application/json';
       fetchOptions.body = JSON.stringify(params);
     }
@@ -296,71 +377,37 @@ class ZeroBounceService {
   
   // Get circuit breaker state
   getCircuitBreakerState() {
-    return this.circuitBreaker.state;
+    return {
+      state: this.circuitBreaker.status,
+      stats: {
+        successes: this.circuitBreaker.stats.successes,
+        failures: this.circuitBreaker.stats.failures,
+        rejects: this.circuitBreaker.stats.rejects,
+        timeouts: this.circuitBreaker.stats.timeouts
+      }
+    };
   }
   
   // Health check
   async healthCheck() {
     try {
-      // Try to get credits as a health check
-      const credits = await this.getCredits();
+      const credits = await this.checkCredits();
       
       return {
         status: 'healthy',
-        circuitBreaker: this.circuitBreaker.state,
-        credits: credits,
+        circuitBreaker: this.circuitBreaker.status,
+        credits,
         cacheSize: this.responseCache.size,
         enabled: config.services.zeroBounce.enabled
       };
     } catch (error) {
       return {
         status: 'unhealthy',
-        circuitBreaker: this.circuitBreaker.state,
+        circuitBreaker: this.circuitBreaker.status,
         error: error.message,
         enabled: config.services.zeroBounce.enabled
       };
     }
-  }
-  
-  // Parse ZeroBounce response to standard format
-  parseResponse(zbResponse) {
-    // Map ZeroBounce status to our standard status
-    const statusMap = {
-      'valid': 'valid',
-      'invalid': 'invalid',
-      'catch-all': 'valid', // We consider catch-all as valid but flag it
-      'unknown': 'unknown',
-      'spamtrap': 'invalid',
-      'abuse': 'invalid',
-      'do_not_mail': 'invalid'
-    };
-    
-    const status = statusMap[zbResponse.status] || 'unknown';
-    
-    return {
-      email: zbResponse.address,
-      status: status,
-      sub_status: zbResponse.sub_status,
-      free_email: zbResponse.free_email === true,
-      role: zbResponse.role === true,
-      catch_all: zbResponse.status === 'catch-all',
-      disposable: zbResponse.disposable === true,
-      toxic: zbResponse.toxic === true,
-      do_not_mail: zbResponse.do_not_mail === true,
-      score: zbResponse.smtp_score || null,
-      did_you_mean: zbResponse.did_you_mean || null,
-      
-      // Additional metadata
-      mx_found: zbResponse.mx_found === true,
-      mx_record: zbResponse.mx_record,
-      smtp_provider: zbResponse.smtp_provider,
-      
-      // Processing info
-      processed_at: zbResponse.processed_at || new Date().toISOString(),
-      
-      // Raw response for debugging
-      raw: zbResponse
-    };
   }
 }
 

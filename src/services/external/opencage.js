@@ -1,10 +1,10 @@
 // src/services/external/opencage.js
+import CircuitBreaker from 'opossum';
 import { config } from '../../core/config.js';
 import { createServiceLogger } from '../../core/logger.js';
 import { 
   ExternalServiceError,
   OpenCageError,
-  CircuitBreaker,
   ErrorRecovery,
   TimeoutError
 } from '../../core/errors.js';
@@ -19,13 +19,19 @@ class OpenCageService {
     this.timeout = config.services.openCage.timeout;
     this.maxRetries = config.services.openCage.maxRetries;
     
-    // Initialize circuit breaker
-    this.circuitBreaker = new CircuitBreaker({
+    // Initialize circuit breaker with Opossum
+    this.circuitBreaker = new CircuitBreaker(this.executeRequest.bind(this), {
       name: 'OpenCage',
-      failureThreshold: 5,
-      resetTimeout: 60000, // 1 minute
-      monitoringPeriod: 10000 // 10 seconds
+      timeout: 10000, // Time in ms before a request is considered failed
+      errorThresholdPercentage: 50, // When 50% of requests fail, trip the circuit
+      resetTimeout: 60000, // Wait time before trying to close the circuit
+      volumeThreshold: 5, // Minimum number of requests needed before tripping circuit
+      rollingCountTimeout: 10000, // Time window for error rate calculation
+      rollingCountBuckets: 10 // Number of buckets for stats tracking
     });
+    
+    // Add event listeners
+    this.setupCircuitBreakerEvents();
     
     // Cache for geocoding results
     this.geocodeCache = new Map();
@@ -38,6 +44,33 @@ class OpenCageService {
       reset: null,
       lastChecked: null
     };
+  }
+  
+  // Setup circuit breaker event handlers
+  setupCircuitBreakerEvents() {
+    this.circuitBreaker.on('open', () => {
+      this.logger.warn('OpenCage circuit breaker opened');
+    });
+    
+    this.circuitBreaker.on('halfOpen', () => {
+      this.logger.info('OpenCage circuit breaker half-open, testing service');
+    });
+    
+    this.circuitBreaker.on('close', () => {
+      this.logger.info('OpenCage circuit breaker closed, service recovered');
+    });
+    
+    this.circuitBreaker.on('fallback', (result) => {
+      this.logger.warn('OpenCage circuit breaker fallback executed');
+    });
+    
+    this.circuitBreaker.on('timeout', () => {
+      this.logger.warn('OpenCage request timed out');
+    });
+    
+    this.circuitBreaker.on('reject', () => {
+      this.logger.warn('OpenCage request rejected (circuit open)');
+    });
   }
   
   // Geocode an address
@@ -69,287 +102,171 @@ class OpenCageService {
     }
     
     // Execute with circuit breaker
-    return this.circuitBreaker.execute(async () => {
-      try {
-        const result = await ErrorRecovery.withRetry(
-          async (attempt) => {
-            this.logger.debug('Calling OpenCage API', { 
-              address, 
-              attempt,
-              timeout
-            });
-            
-            const response = await this.makeApiCall('/json', {
-              key: this.apiKey,
-              q: address,
-              limit: limit,
-              language: language,
-              pretty: 0,
-              no_annotations: 0,
-              ...(countryCode && { countrycode: countryCode.toLowerCase() }),
-              ...(bounds && { bounds: bounds })
-            }, {
-              timeout
-            });
-            
-            return response;
-          },
-          {
-            maxAttempts: this.maxRetries,
-            delay: 1000,
-            backoffMultiplier: 2,
-            onRetry: (error, attempt) => {
-              this.logger.warn('Retrying OpenCage geocoding', {
-                address,
-                attempt,
-                error: error.message
-              });
-            }
-          }
-        );
-        
-        // Parse and cache result
-        const parsedResult = this.parseGeocodeResponse(result, address);
-        this.addToCache(cacheKey, parsedResult);
-        
-        return parsedResult;
-      } catch (error) {
-        this.logger.error('OpenCage geocoding failed', error, { address });
-        
-        // Transform to appropriate error type
-        if (error instanceof TimeoutError) {
-          throw new OpenCageError('Request timeout', 504, error);
-        } else if (error.statusCode === 429) {
-          throw new OpenCageError('Rate limit exceeded', 429, error);
-        } else if (error.statusCode === 401 || error.statusCode === 403) {
-          throw new OpenCageError('Invalid API key', 401, error);
-        } else {
-          throw new OpenCageError(
-            error.message || 'Geocoding failed',
-            error.statusCode || 503,
-            error
-          );
-        }
-      }
-    });
-  }
-  
-  // Reverse geocode coordinates
-  async reverseGeocode(lat, lng, options = {}) {
-    const {
-      language = 'en',
-      timeout = this.timeout
-    } = options;
-    
-    // Check if service is enabled
-    if (!config.services.openCage.enabled) {
-      throw new OpenCageError('OpenCage service is not enabled', 503);
-    }
-    
-    // Check if API key is configured
-    if (!this.apiKey) {
-      throw new OpenCageError('OpenCage API key not configured', 503);
-    }
-    
-    const query = `${lat},${lng}`;
-    
-    return this.circuitBreaker.execute(async () => {
-      try {
-        const response = await this.makeApiCall('/json', {
-          key: this.apiKey,
-          q: query,
-          language: language,
-          pretty: 0,
-          no_annotations: 0
-        }, {
-          timeout
-        });
-        
-        return this.parseGeocodeResponse(response, query);
-      } catch (error) {
-        this.logger.error('Reverse geocoding failed', error, { lat, lng });
-        throw new OpenCageError(
-          'Reverse geocoding failed',
-          error.statusCode || 503,
-          error
-        );
-      }
-    });
-  }
-  
-  // Make API call
-  async makeApiCall(endpoint, params, options = {}) {
-    const {
-      method = 'GET',
-      timeout = this.timeout
-    } = options;
-    
-    const url = new URL(`${this.baseUrl}${endpoint}`);
-    
-    // Add parameters to URL for GET requests
-    if (method === 'GET' && params) {
-      Object.keys(params).forEach(key => {
-        if (params[key] !== undefined && params[key] !== null) {
-          url.searchParams.append(key, params[key]);
-        }
-      });
-    }
-    
-    const fetchOptions = {
-      method,
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Unmessy-API/1.0'
-      }
-    };
-    
     try {
-      const response = await ErrorRecovery.withTimeout(
-        fetch(url.toString(), fetchOptions),
-        timeout,
-        `OpenCage ${endpoint}`
-      );
+      const requestData = {
+        address,
+        countryCode,
+        bounds,
+        language,
+        limit,
+        timeout
+      };
       
-      // Extract rate limit info from headers
-      this.updateRateLimitInfo(response.headers);
+      const result = await this.circuitBreaker.fire(requestData);
       
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw {
-          statusCode: response.status,
-          message: errorData.status?.message || response.statusText,
-          code: errorData.status?.code
-        };
-      }
+      // Cache successful response
+      this.addToCache(cacheKey, result);
       
-      const data = await response.json();
-      
-      // Check for API errors in response
-      if (data.status && data.status.code !== 200) {
-        throw {
-          statusCode: data.status.code,
-          message: data.status.message
-        };
-      }
-      
-      this.logger.debug('OpenCage API call successful', {
-        endpoint,
-        status: response.status,
-        results: data.results?.length || 0
-      });
-      
-      return data;
+      return result;
     } catch (error) {
-      if (error instanceof TimeoutError) {
+      if (error.name === 'CircuitBreaker:OpenError') {
+        throw new OpenCageError('OpenCage service is currently unavailable (circuit open)', 503);
+      }
+      
+      if (error.name === 'CircuitBreaker:TimeoutError') {
+        throw new TimeoutError('OpenCage', timeout);
+      }
+      
+      if (error instanceof OpenCageError || error instanceof TimeoutError) {
         throw error;
       }
       
-      this.logger.error('OpenCage API call failed', error, {
-        endpoint,
-        statusCode: error.statusCode
-      });
-      
+      throw new OpenCageError(`Geocoding failed: ${error.message}`, 500);
+    }
+  }
+  
+  // This is the function that will be wrapped by the circuit breaker
+  async executeRequest(requestData) {
+    const {
+      address,
+      countryCode,
+      bounds,
+      language,
+      limit,
+      timeout
+    } = requestData;
+    
+    try {
+      return await ErrorRecovery.withRetry(
+        async (attempt) => {
+          this.logger.debug('Calling OpenCage API', { 
+            address, 
+            attempt,
+            timeout
+          });
+          
+          const url = new URL('/geocode/v1/json', this.baseUrl);
+          
+          // Build query parameters
+          const params = {
+            q: address,
+            key: this.apiKey,
+            language: language || 'en',
+            limit: limit || 1,
+            no_annotations: 0,
+            abbrv: 1
+          };
+          
+          // Add optional parameters
+          if (countryCode) {
+            params.countrycode = countryCode;
+          }
+          
+          if (bounds) {
+            params.bounds = bounds;
+          }
+          
+          // Add params to URL
+          Object.keys(params).forEach(key => {
+            url.searchParams.append(key, params[key]);
+          });
+          
+          // Execute API call with timeout
+          const response = await ErrorRecovery.withTimeout(
+            fetch(url.toString()),
+            timeout,
+            `OpenCage geocode: ${address}`
+          );
+          
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new OpenCageError(
+              `API error: ${response.status} ${errorText || response.statusText}`,
+              response.status
+            );
+          }
+          
+          // Update rate limit info from headers
+          this.updateRateLimitInfo(response.headers);
+          
+          const data = await response.json();
+          
+          if (!data || !data.results) {
+            throw new OpenCageError('Invalid response from OpenCage API');
+          }
+          
+          // Format response
+          return this.formatGeocodingResponse(data, address);
+        },
+        this.maxRetries,
+        500, // Initial delay in ms
+        (error) => {
+          // Only retry on network errors or 5xx errors
+          return (
+            error.message?.includes('network') ||
+            error.statusCode >= 500 ||
+            error instanceof TimeoutError
+          );
+        }
+      );
+    } catch (error) {
+      this.logger.error('OpenCage geocoding failed', error, { address });
       throw error;
     }
   }
   
-  // Parse geocoding response
-  parseGeocodeResponse(response, query) {
-    if (!response.results || response.results.length === 0) {
-      return {
-        query,
-        found: false,
-        results: [],
-        totalResults: 0
-      };
-    }
+  // Format geocoding response
+  formatGeocodingResponse(data, query) {
+    const results = data.results || [];
+    const found = results.length > 0;
     
-    const results = response.results.map(result => ({
-      // Basic info
-      formatted: result.formatted,
-      confidence: result.confidence || 0,
-      
-      // Geometry
-      geometry: {
-        lat: result.geometry.lat,
-        lng: result.geometry.lng
-      },
-      
-      // Bounds if available
-      bounds: result.bounds || null,
-      
-      // Parsed components with all um_address fields
-      components: this.parseAddressComponents(result.components),
-      
-      // Additional metadata
-      annotations: {
-        timezone: result.annotations?.timezone,
-        what3words: result.annotations?.what3words,
-        currency: result.annotations?.currency,
-        dms: result.annotations?.DMS
-      }
-    }));
+    // Extract components from first result
+    const components = found ? results[0].components || {} : {};
+    
+    // Extract formatted address
+    const formattedAddress = found ? results[0].formatted || '' : '';
+    
+    // Extract coordinates
+    const coordinates = found ? {
+      latitude: results[0].geometry.lat,
+      longitude: results[0].geometry.lng
+    } : {
+      latitude: null,
+      longitude: null
+    };
+    
+    // Extract confidence
+    const confidence = found ? results[0].confidence || 0 : 0;
     
     return {
       query,
-      found: true,
-      results,
-      totalResults: response.total_results || results.length,
-      timestamp: new Date().toISOString()
-    };
-  }
-  
-  // Parse address components into um_address fields
-  parseAddressComponents(components) {
-    if (!components) return {};
-    
-    // Extract street number and name
-    let houseNumber = components.house_number || '';
-    let streetName = components.road || components.street || '';
-    let streetType = '';
-    let streetDirection = '';
-    
-    // Try to parse street type from road name
-    if (streetName) {
-      const streetParts = streetName.split(' ');
-      const lastPart = streetParts[streetParts.length - 1];
-      
-      // Check if last part is a street type
-      const commonTypes = ['Street', 'St', 'Avenue', 'Ave', 'Road', 'Rd', 'Drive', 'Dr', 
-                          'Lane', 'Ln', 'Court', 'Ct', 'Boulevard', 'Blvd', 'Way'];
-      if (commonTypes.some(type => lastPart.toLowerCase() === type.toLowerCase())) {
-        streetType = lastPart;
-        streetName = streetParts.slice(0, -1).join(' ');
-      }
-    }
-    
-    return {
-      // House and street info
-      um_house_number: houseNumber,
-      um_street_name: streetName,
-      um_street_type: streetType,
-      um_street_direction: streetDirection,
-      
-      // Unit info (OpenCage doesn't usually provide this)
-      um_unit_type: '',
-      um_unit_number: '',
-      
-      // Constructed address lines
-      um_address_line_1: [houseNumber, streetDirection, streetName, streetType]
-        .filter(Boolean).join(' ').trim(),
-      um_address_line_2: '',
-      
-      // City/State/Country
-      um_city: components.city || components.town || components.village || 
-               components.hamlet || components.suburb || '',
-      um_state_province: components.state_code || components.state || 
-                        components.province || components.region || '',
-      um_country: components.country || '',
-      um_country_code: (components.country_code || '').toUpperCase(),
-      um_postal_code: components.postcode || '',
-      
-      // Raw components for reference
-      raw: components
+      found,
+      formattedAddress,
+      coordinates,
+      confidence,
+      components: {
+        houseNumber: components.house_number || '',
+        road: components.road || components.street || '',
+        suburb: components.suburb || components.neighborhood || '',
+        city: components.city || components.town || components.village || '',
+        county: components.county || components.state_district || '',
+        state: components.state || components.province || '',
+        country: components.country || '',
+        countryCode: components.country_code || '',
+        postcode: components.postcode || components.postal_code || ''
+      },
+      source: 'opencage',
+      reference: components
     };
   }
   
@@ -422,7 +339,15 @@ class OpenCageService {
   
   // Get circuit breaker state
   getCircuitBreakerState() {
-    return this.circuitBreaker.state;
+    return {
+      state: this.circuitBreaker.status,
+      stats: {
+        successes: this.circuitBreaker.stats.successes,
+        failures: this.circuitBreaker.stats.failures,
+        rejects: this.circuitBreaker.stats.rejects,
+        timeouts: this.circuitBreaker.stats.timeouts
+      }
+    };
   }
   
   // Get rate limit info
@@ -442,7 +367,7 @@ class OpenCageService {
       
       return {
         status: 'healthy',
-        circuitBreaker: this.circuitBreaker.state,
+        circuitBreaker: this.circuitBreaker.status,
         rateLimit: this.getRateLimitInfo(),
         cacheSize: this.geocodeCache.size,
         enabled: config.services.openCage.enabled,
@@ -451,7 +376,7 @@ class OpenCageService {
     } catch (error) {
       return {
         status: 'unhealthy',
-        circuitBreaker: this.circuitBreaker.state,
+        circuitBreaker: this.circuitBreaker.status,
         error: error.message,
         enabled: config.services.openCage.enabled
       };

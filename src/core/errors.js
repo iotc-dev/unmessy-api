@@ -1,4 +1,5 @@
 // src/core/errors.js
+import CircuitBreaker from 'opossum';
 
 // Base custom error class
 export class AppError extends Error {
@@ -83,67 +84,43 @@ export class RateLimitError extends AppError {
     this.limit = limit;
     this.used = used;
     this.remaining = remaining;
-    this.retryAfter = this.calculateRetryAfter();
-  }
-  
-  calculateRetryAfter() {
-    const now = new Date();
-    const midnight = new Date(now);
-    midnight.setHours(24, 0, 0, 0);
-    return Math.ceil((midnight - now) / 1000); // seconds until midnight
-  }
-  
-  toJSON() {
-    return {
-      ...super.toJSON(),
-      validationType: this.validationType,
-      limit: this.limit,
-      used: this.used,
-      remaining: this.remaining,
-      retryAfter: this.retryAfter
-    };
   }
 }
 
 // External service errors
 export class ExternalServiceError extends AppError {
-  constructor(service, message, originalError = null) {
-    super(`External service error (${service}): ${message}`, 503, true);
+  constructor(service, message, statusCode = 502) {
+    super(`${service} service error: ${message}`, statusCode, true);
     this.name = 'ExternalServiceError';
     this.service = service;
-    this.originalError = originalError;
   }
 }
 
 export class ZeroBounceError extends ExternalServiceError {
-  constructor(message, statusCode, originalError) {
-    super('ZeroBounce', message, originalError);
+  constructor(message, statusCode = 502) {
+    super('ZeroBounce', message, statusCode);
     this.name = 'ZeroBounceError';
-    this.apiStatusCode = statusCode;
   }
 }
 
 export class HubSpotError extends ExternalServiceError {
-  constructor(message, statusCode, originalError) {
-    super('HubSpot', message, originalError);
+  constructor(message, statusCode = 502) {
+    super('HubSpot', message, statusCode);
     this.name = 'HubSpotError';
-    this.apiStatusCode = statusCode;
   }
 }
 
 export class OpenCageError extends ExternalServiceError {
-  constructor(message, statusCode, originalError) {
-    super('OpenCage', message, originalError);
+  constructor(message, statusCode = 502) {
+    super('OpenCage', message, statusCode);
     this.name = 'OpenCageError';
-    this.apiStatusCode = statusCode;
   }
 }
 
 export class TwilioError extends ExternalServiceError {
-  constructor(message, statusCode, originalError) {
-    super('Twilio', message, originalError);
+  constructor(message, statusCode = 502) {
+    super('Twilio', message, statusCode);
     this.name = 'TwilioError';
-    this.apiStatusCode = statusCode;
   }
 }
 
@@ -213,7 +190,7 @@ export class ConfigurationError extends AppError {
 // Not found error
 export class NotFoundError extends AppError {
   constructor(resource, identifier) {
-    super(`${resource} not found${identifier ? `: ${identifier}` : ''}`, 404, true);
+    super(`${resource} not found${identifier ? ` with ID: ${identifier}` : ''}`, 404, true);
     this.name = 'NotFoundError';
     this.resource = resource;
     this.identifier = identifier;
@@ -222,78 +199,61 @@ export class NotFoundError extends AppError {
 
 // Conflict error
 export class ConflictError extends AppError {
-  constructor(message, resource = null) {
-    super(message, 409, true);
+  constructor(resource, identifier) {
+    super(`${resource} already exists${identifier ? ` with ID: ${identifier}` : ''}`, 409, true);
     this.name = 'ConflictError';
     this.resource = resource;
+    this.identifier = identifier;
   }
 }
 
 // Error recovery utilities
 export class ErrorRecovery {
-  static async withRetry(
-    operation, 
-    options = {}
-  ) {
-    const {
-      maxAttempts = 3,
-      initialDelay = 1000,
-      maxDelay = 10000,
-      backoffMultiplier = 2,
-      retryableErrors = [
-        DatabaseConnectionError,
-        DatabaseTimeoutError,
-        ExternalServiceError,
-        TimeoutError
-      ],
-      onRetry = null,
-      context = {}
-    } = options;
+  // Retry an operation with exponential backoff
+  static async withRetry(operation, maxRetries = 3, initialDelayMs = 500, shouldRetry = null) {
+    let lastError = null;
+    let delay = initialDelayMs;
     
-    let lastError;
-    let delay = initialDelay;
-    
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
       try {
         return await operation(attempt);
       } catch (error) {
         lastError = error;
         
-        // Check if error is retryable
-        const isRetryable = retryableErrors.some(
-          ErrorClass => error instanceof ErrorClass
-        ) || (error.isOperational && error.statusCode >= 500);
-        
-        if (!isRetryable || attempt === maxAttempts) {
+        // Don't retry if we've reached max attempts or if shouldRetry returns false
+        if (attempt > maxRetries || (shouldRetry && !shouldRetry(error))) {
           throw error;
         }
         
-        // Call retry callback if provided
-        if (onRetry) {
-          await onRetry(error, attempt, delay, context);
-        }
-        
-        // Wait before retry
+        // Wait before retrying
         await ErrorRecovery.sleep(delay);
         
-        // Calculate next delay with exponential backoff
-        delay = Math.min(delay * backoffMultiplier, maxDelay);
+        // Exponential backoff
+        delay *= 2;
       }
     }
     
     throw lastError;
   }
   
-  static async withTimeout(operation, timeoutMs, operationName = 'Operation') {
+  // Operation with timeout
+  static async withTimeout(promise, timeoutMs, operation = 'unknown') {
+    let timeoutId;
+    
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => {
-        reject(new TimeoutError(operationName, timeoutMs));
+      timeoutId = setTimeout(() => {
+        reject(new TimeoutError(operation, timeoutMs));
       }, timeoutMs);
     });
     
-    return Promise.race([operation, timeoutPromise]);
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }
   
+  // Execute with fallback
   static async withFallback(operation, fallbackOperation, shouldFallback = null) {
     try {
       return await operation();
@@ -310,142 +270,26 @@ export class ErrorRecovery {
   }
 }
 
-// Circuit breaker for external services
-export class CircuitBreaker {
-  constructor(options = {}) {
-    this.name = options.name || 'CircuitBreaker';
-    this.failureThreshold = options.failureThreshold || 5;
-    this.resetTimeout = options.resetTimeout || 60000; // 1 minute
-    this.monitoringPeriod = options.monitoringPeriod || 10000; // 10 seconds
-    
-    this.state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
-    this.failures = 0;
-    this.lastFailureTime = null;
-    this.nextAttempt = null;
-    this.successCount = 0;
-    this.failureCount = 0;
-  }
-  
-  async execute(operation) {
-    if (this.state === 'OPEN') {
-      if (Date.now() < this.nextAttempt) {
-        throw new ExternalServiceError(
-          this.name,
-          `Circuit breaker is OPEN. Service unavailable until ${new Date(this.nextAttempt).toISOString()}`
-        );
-      }
-      this.state = 'HALF_OPEN';
-    }
-    
-    try {
-      const result = await operation();
-      this.onSuccess();
-      return result;
-    } catch (error) {
-      this.onFailure();
-      throw error;
-    }
-  }
-  
-  onSuccess() {
-    this.failures = 0;
-    this.successCount++;
-    
-    if (this.state === 'HALF_OPEN') {
-      this.state = 'CLOSED';
-    }
-  }
-  
-  onFailure() {
-    this.failures++;
-    this.failureCount++;
-    this.lastFailureTime = Date.now();
-    
-    if (this.failures >= this.failureThreshold) {
-      this.state = 'OPEN';
-      this.nextAttempt = Date.now() + this.resetTimeout;
-    }
-  }
-  
-  getStatus() {
-    return {
-      name: this.name,
-      state: this.state,
-      failures: this.failures,
-      successCount: this.successCount,
-      failureCount: this.failureCount,
-      lastFailureTime: this.lastFailureTime,
-      nextAttempt: this.nextAttempt
-    };
-  }
-}
-
 // Error handler middleware
-export const errorHandler = (logger) => (err, req, res, next) => {
-  // Log error
-  if (logger && req.logger) {
-    req.logger.error('Request error', err, {
-      url: req.url,
-      method: req.method,
-      ip: req.ip,
-      userAgent: req.get('user-agent')
-    });
-  }
-  
-  // Set default error values
-  let statusCode = err.statusCode || 500;
-  let message = err.message || 'Internal server error';
-  let status = err.status || 'error';
-  
-  // Handle specific error types
-  if (err instanceof ValidationError) {
-    return res.status(statusCode).json({
-      status,
-      message,
-      errors: err.validationErrors
-    });
-  }
-  
-  if (err instanceof RateLimitError) {
-    res.set('X-RateLimit-Limit', err.limit);
-    res.set('X-RateLimit-Remaining', err.remaining);
-    res.set('X-RateLimit-Reset', new Date(Date.now() + err.retryAfter * 1000).toISOString());
-    res.set('Retry-After', err.retryAfter);
-    
-    return res.status(statusCode).json({
-      status,
-      message,
-      limit: err.limit,
-      used: err.used,
-      remaining: err.remaining,
-      retryAfter: err.retryAfter
-    });
-  }
-  
-  if (err instanceof AuthenticationError || err instanceof AuthorizationError) {
-    return res.status(statusCode).json({
-      status,
-      message,
-      reason: err.reason
-    });
-  }
-  
-  // Handle database errors
-  if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
-    statusCode = 503;
-    message = 'Service temporarily unavailable';
-  }
+export const errorHandler = (err, req, res, next) => {
+  let error = err;
+  let statusCode = error.statusCode || 500;
+  let status = error.status || 'error';
+  let message = error.message || 'Something went wrong';
   
   // Handle Joi validation errors
-  if (err.name === 'ValidationError' && err.details) {
-    return res.status(400).json({
-      status: 'fail',
-      message: 'Validation error',
-      errors: err.details.map(detail => ({
-        field: detail.path.join('.'),
+  if (error.name === 'ValidationError' && error.details) {
+    statusCode = 400;
+    status = 'fail';
+    message = 'Invalid input data';
+    
+    error = {
+      ...error,
+      validationErrors: error.details.map(detail => ({
+        field: detail.context.key,
         message: detail.message
       }))
-    });
+    };
   }
   
   // Don't leak error details in production
@@ -494,7 +338,7 @@ export default {
   NotFoundError,
   ConflictError,
   ErrorRecovery,
-  CircuitBreaker,
+  // CircuitBreaker is removed and replaced with Opossum
   errorHandler,
   asyncHandler
 };
