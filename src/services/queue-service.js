@@ -1,5 +1,5 @@
 // src/services/queue-service.js
-import { db } from '../core/db.js';
+import db from '../core/db.js';
 import { config } from '../core/config.js';
 import { createServiceLogger } from '../core/logger.js';
 import { 
@@ -7,9 +7,9 @@ import {
   TimeoutError,
   ErrorRecovery 
 } from '../core/errors.js';
-import { validationService } from './validation-service.js';
-import { clientService } from './client-service.js';
-import { hubSpotService } from './external/hubspot.js';
+import validationService from './validation-service.js';
+import clientService from './client-service.js';
+import { hubspotService } from './external/hubspot.js';
 
 const logger = createServiceLogger('queue-service');
 
@@ -32,45 +32,95 @@ class QueueService {
     
     // Lock management
     this.lockId = null;
-    this.lockTimeout = config.queue.lockTimeout;
+    this.lockTimeout = config.queue.lockTimeout || 300000; // 5 minutes default
     
     // Parallel processing configuration
     this.maxConcurrency = config.queue.maxConcurrency || 5;
   }
   
-  // Enqueue a new webhook event
+  // Enqueue multiple webhook events
+  async enqueueWebhookEvents(events) {
+    if (!Array.isArray(events) || events.length === 0) {
+      return { success: true, count: 0 };
+    }
+    
+    try {
+      const results = [];
+      
+      for (const event of events) {
+        try {
+          const result = await this.enqueueWebhookEvent(event);
+          results.push(result);
+        } catch (error) {
+          this.logger.error('Failed to enqueue event', error, {
+            eventId: event.event_id
+          });
+        }
+      }
+      
+      return {
+        success: true,
+        count: results.length,
+        results
+      };
+    } catch (error) {
+      this.logger.error('Failed to enqueue webhook events', error);
+      throw new QueueError('Failed to enqueue events', error);
+    }
+  }
+  
+  // Enqueue a single webhook event
   async enqueueWebhookEvent(eventData) {
     try {
       const queueItem = {
-        event_id: eventData.eventId,
-        subscription_type: eventData.subscriptionType,
-        object_type: eventData.objectType || 'CONTACT',
-        object_id: eventData.objectId,
-        property_name: eventData.propertyName,
-        property_value: eventData.propertyValue,
-        occurred_at: eventData.occurredAt,
-        portal_id: eventData.portalId,
-        client_id: eventData.clientId,
-        app_id: eventData.appId,
-        event_data: eventData,
+        event_id: eventData.event_id,
+        subscription_type: eventData.subscription_type,
+        object_id: eventData.object_id,
+        portal_id: eventData.portal_id,
+        occurred_at: eventData.occurred_at,
+        property_name: eventData.property_name,
+        property_value: eventData.property_value,
+        contact_email: eventData.contact_email,
+        contact_firstname: eventData.contact_firstname,
+        contact_lastname: eventData.contact_lastname,
+        contact_phone: eventData.contact_phone,
         status: 'pending',
+        client_id: eventData.client_id,
         attempts: 0,
-        max_attempts: config.queue.maxRetries
+        max_attempts: config.queue.maxRetries || 3,
+        needs_email_validation: eventData.needs_email_validation || false,
+        needs_name_validation: eventData.needs_name_validation || false,
+        needs_phone_validation: eventData.needs_phone_validation || false,
+        needs_address_validation: eventData.needs_address_validation || false,
+        event_data: eventData.event_data,
+        contact_data: eventData.contact_data
       };
       
-      const result = await db.enqueueWebhookEvent(queueItem);
+      const { rows } = await db.insert('hubspot_webhook_queue', queueItem, {
+        returning: ['id', 'event_id']
+      });
+      
+      const result = rows[0];
       
       this.logger.info('Webhook event enqueued', {
-        eventId: eventData.eventId,
-        type: eventData.subscriptionType,
-        clientId: eventData.clientId,
+        eventId: eventData.event_id,
+        type: eventData.subscription_type,
+        clientId: eventData.client_id,
         queueId: result.id
       });
       
       return result;
     } catch (error) {
+      // Check for duplicate event
+      if (error.code === '23505') { // PostgreSQL unique violation
+        this.logger.debug('Event already queued', {
+          eventId: eventData.event_id
+        });
+        return { id: null, event_id: eventData.event_id, duplicate: true };
+      }
+      
       this.logger.error('Failed to enqueue webhook event', error, {
-        eventId: eventData.eventId
+        eventId: eventData.event_id
       });
       throw new QueueError('Failed to enqueue event', error);
     }
@@ -80,7 +130,7 @@ class QueueService {
   async processPendingItems(options = {}) {
     const {
       batchSize = config.queue.batchSize,
-      maxRuntime = config.queue.maxRuntime,
+      maxRuntime = config.queue.maxRuntime || 270000, // 4.5 minutes default
       concurrency = this.maxConcurrency
     } = options;
     
@@ -116,7 +166,7 @@ class QueueService {
       }
       
       // Fetch pending items
-      const items = await db.getPendingQueueItems(batchSize);
+      const items = await this.getPendingQueueItems(batchSize);
       
       if (items.length === 0) {
         this.logger.info('No pending queue items');
@@ -155,7 +205,7 @@ class QueueService {
         } else {
           stats.failed++;
           stats.errors.push({
-            error: result.reason.message
+            error: result.reason?.message || 'Unknown error'
           });
         }
       }
@@ -191,6 +241,26 @@ class QueueService {
     }
   }
   
+  // Get pending queue items
+  async getPendingQueueItems(limit) {
+    try {
+      const { rows } = await db.query(
+        `SELECT * FROM hubspot_webhook_queue
+         WHERE status = 'pending'
+         AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+         AND attempts < max_attempts
+         ORDER BY created_at ASC
+         LIMIT $1`,
+        [limit]
+      );
+      
+      return rows;
+    } catch (error) {
+      this.logger.error('Failed to get pending queue items', error);
+      throw new QueueError('Failed to fetch queue items', error);
+    }
+  }
+  
   // Process items in parallel with concurrency control
   async processItemsInParallel(items, options) {
     const { concurrency, maxRuntime, signal } = options;
@@ -212,11 +282,6 @@ class QueueService {
           remaining: queue.length,
           inProgress: inProgress.size
         });
-        
-        // Cancel in-progress items
-        for (const [itemId, promise] of inProgress) {
-          promise.cancel?.();
-        }
         break;
       }
       
@@ -306,13 +371,13 @@ class QueueService {
       });
       
       // Mark as processing
-      await db.updateQueueItemStatus(item.id, 'processing', {
+      await this.updateQueueItemStatus(item.id, 'processing', {
         processing_started_at: new Date().toISOString()
       });
       
       // Get contact data (if not already fetched)
       let contactData = item.contact_data;
-      if (!contactData) {
+      if (!contactData && item.needs_email_validation) {
         contactData = await this.fetchContactData(item);
       }
       
@@ -323,7 +388,7 @@ class QueueService {
       const formResult = await this.submitToHubSpot(item, contactData, validationResults);
       
       // Mark as completed
-      await db.updateQueueItemStatus(item.id, 'completed', {
+      await this.updateQueueItemStatus(item.id, 'completed', {
         processing_completed_at: new Date().toISOString(),
         validation_results: validationResults,
         form_submission_response: formResult
@@ -354,9 +419,6 @@ class QueueService {
         processingTime
       });
       
-      // Update item status
-      await this.markItemFailed(item, error);
-      
       return {
         success: false,
         itemId: item.id,
@@ -374,23 +436,26 @@ class QueueService {
       }
       
       // Get client's HubSpot config
-      const hubspotConfig = await clientService.getHubSpotConfig(item.client_id);
+      const hubspotConfig = await clientService.getClientHubSpotConfig(item.client_id);
       if (!hubspotConfig?.enabled) {
         throw new Error('HubSpot not enabled for client');
       }
       
       // Fetch contact from HubSpot
-      const contact = await hubSpotService.getContact(item.object_id, {
-        portalId: item.portal_id,
-        properties: [
-          'email', 'firstname', 'lastname', 'phone',
-          'um_email', 'um_first_name', 'um_last_name',
-          'um_email_status', 'um_bounce_status', 'um_name_status'
-        ]
-      });
+      const contact = await hubspotService.fetchContact(
+        item.object_id,
+        hubspotConfig.apiKey,
+        {
+          properties: [
+            'email', 'firstname', 'lastname', 'phone',
+            'um_email', 'um_first_name', 'um_last_name',
+            'um_email_status', 'um_bounce_status', 'um_name_status'
+          ]
+        }
+      );
       
       // Store in queue item for future use
-      await db.updateQueueItemData(item.id, {
+      await this.updateQueueItemData(item.id, {
         contact_data: contact
       });
       
@@ -410,20 +475,18 @@ class QueueService {
     
     // Determine what to validate
     const shouldValidateEmail = 
-      item.subscription_type === 'contact.creation' ||
-      (item.subscription_type === 'contact.propertyChange' && item.property_name === 'email');
+      item.needs_email_validation && contactData?.properties?.email;
       
     const shouldValidateName = 
-      item.subscription_type === 'contact.creation' ||
-      (item.subscription_type === 'contact.propertyChange' && 
-       (item.property_name === 'firstname' || item.property_name === 'lastname'));
+      item.needs_name_validation && 
+      (contactData?.properties?.firstname || contactData?.properties?.lastname);
     
     // Run validations in parallel
     const validationPromises = [];
     
-    if (shouldValidateEmail && contactData.email) {
+    if (shouldValidateEmail) {
       validationPromises.push(
-        validationService.validateEmail(contactData.email, {
+        validationService.validateEmail(contactData.properties.email, {
           clientId: item.client_id,
           skipExternal: false // Use external for background processing
         }).then(result => {
@@ -435,12 +498,12 @@ class QueueService {
       );
     }
     
-    if (shouldValidateName && (contactData.firstname || contactData.lastname)) {
+    if (shouldValidateName) {
       validationPromises.push(
         validationService.validateName(null, {
           clientId: item.client_id,
-          firstName: contactData.firstname,
-          lastName: contactData.lastname
+          firstName: contactData.properties.firstname,
+          lastName: contactData.properties.lastname
         }).then(result => {
           results.name = result;
         }).catch(error => {
@@ -460,7 +523,7 @@ class QueueService {
   async submitToHubSpot(item, contactData, validationResults) {
     try {
       // Get client's HubSpot config
-      const hubspotConfig = await clientService.getHubSpotConfig(item.client_id);
+      const hubspotConfig = await clientService.getClientHubSpotConfig(item.client_id);
       
       if (!hubspotConfig?.enabled || !hubspotConfig.portalId || !hubspotConfig.formGuid) {
         throw new Error('HubSpot form submission not configured');
@@ -469,16 +532,22 @@ class QueueService {
       // Build form fields
       const fields = this.buildFormFields(contactData, validationResults, item.client_id);
       
-      // Submit to HubSpot
-      const result = await hubSpotService.submitForm({
-        portalId: hubspotConfig.portalId,
-        formGuid: hubspotConfig.formGuid,
-        fields,
-        context: {
-          hutk: contactData.hutk,
-          ipAddress: item.ip_address
-        }
+      // Build form data object
+      const formData = {};
+      fields.forEach(field => {
+        formData[field.name] = field.value;
       });
+      
+      // Submit to HubSpot
+      const result = await hubspotService.submitForm(
+        formData,
+        hubspotConfig.portalId,
+        hubspotConfig.formGuid,
+        {
+          pageUri: 'https://unmessy-api.vercel.app/queue-processor',
+          pageName: 'Unmessy Queue Processor'
+        }
+      );
       
       // Update rate limits
       await this.updateRateLimits(item.client_id, validationResults);
@@ -500,7 +569,7 @@ class QueueService {
     // Always include email for contact matching
     fields.push({
       name: 'email',
-      value: contactData.email || ''
+      value: contactData?.properties?.email || ''
     });
     
     // Always include timestamp and check ID
@@ -508,6 +577,7 @@ class QueueService {
     const umCheckId = this.generateUmCheckId(clientId, epochMs);
     
     fields.push(
+      { name: 'date_last_um_check', value: new Date().toISOString() },
       { name: 'date_last_um_check_epoch', value: epochMs.toString() },
       { name: 'um_check_id', value: umCheckId.toString() }
     );
@@ -516,7 +586,7 @@ class QueueService {
     if (validationResults.email && !validationResults.email.error) {
       const emailResult = validationResults.email;
       fields.push(
-        { name: 'um_email', value: emailResult.currentEmail || emailResult.um_email || contactData.email },
+        { name: 'um_email', value: emailResult.currentEmail || emailResult.um_email || contactData?.properties?.email || '' },
         { name: 'um_email_status', value: emailResult.um_email_status || 'Unchanged' },
         { name: 'um_bounce_status', value: emailResult.um_bounce_status || 'Unknown' }
       );
@@ -526,8 +596,8 @@ class QueueService {
     if (validationResults.name && !validationResults.name.error) {
       const nameResult = validationResults.name;
       fields.push(
-        { name: 'um_first_name', value: nameResult.firstName || contactData.firstname || '' },
-        { name: 'um_last_name', value: nameResult.lastName || contactData.lastname || '' },
+        { name: 'um_first_name', value: nameResult.firstName || contactData?.properties?.firstname || '' },
+        { name: 'um_last_name', value: nameResult.lastName || contactData?.properties?.lastname || '' },
         { name: 'um_name', value: `${nameResult.firstName || ''} ${nameResult.lastName || ''}`.trim() },
         { name: 'um_name_status', value: nameResult.wasCorrected ? 'Changed' : 'Unchanged' },
         { name: 'um_name_format', value: nameResult.formatValid ? 'Valid' : 'Invalid' }
@@ -540,11 +610,11 @@ class QueueService {
   // Generate UM check ID
   generateUmCheckId(clientId, epochMs) {
     const lastSixDigits = String(epochMs).slice(-6);
-    const clientIdStr = clientId || config.clients.defaultClientId;
+    const clientIdStr = clientId || config.clients.defaultClientId || '0001';
     const firstThreeDigits = String(epochMs).slice(0, 3);
     const sum = [...firstThreeDigits].reduce((acc, digit) => acc + parseInt(digit), 0);
     const checkDigit = String(sum * parseInt(clientIdStr)).padStart(3, '0').slice(-3);
-    return Number(`${lastSixDigits}${clientIdStr}${checkDigit}${config.unmessy.version}`);
+    return Number(`${lastSixDigits}${clientIdStr}${checkDigit}${config.unmessy.version.replace(/\./g, '')}`);
   }
   
   // Update rate limits after successful validation
@@ -568,12 +638,50 @@ class QueueService {
     await Promise.all(promises);
   }
   
+  // Update queue item status
+  async updateQueueItemStatus(itemId, status, additionalData = {}) {
+    try {
+      const updates = {
+        status,
+        ...additionalData
+      };
+      
+      await db.update(
+        'hubspot_webhook_queue',
+        updates,
+        { id: itemId }
+      );
+    } catch (error) {
+      this.logger.error('Failed to update queue item status', error, {
+        itemId,
+        status
+      });
+      throw error;
+    }
+  }
+  
+  // Update queue item data
+  async updateQueueItemData(itemId, data) {
+    try {
+      await db.update(
+        'hubspot_webhook_queue',
+        data,
+        { id: itemId }
+      );
+    } catch (error) {
+      this.logger.error('Failed to update queue item data', error, {
+        itemId
+      });
+      throw error;
+    }
+  }
+  
   // Mark item as failed
   async markItemFailed(item, error) {
     const shouldRetry = item.attempts < item.max_attempts;
     const nextStatus = shouldRetry ? 'pending' : 'failed';
     
-    await db.updateQueueItemStatus(item.id, nextStatus, {
+    await this.updateQueueItemStatus(item.id, nextStatus, {
       attempts: item.attempts + 1,
       error_message: error.message,
       error_details: {
@@ -599,7 +707,19 @@ class QueueService {
   async acquireLock() {
     try {
       this.lockId = `queue_processor_${Date.now()}_${Math.random()}`;
-      const acquired = await db.acquireQueueLock(this.lockId, this.lockTimeout);
+      
+      // Simple lock implementation using database
+      const { rows } = await db.insert(
+        'queue_locks',
+        {
+          lock_id: this.lockId,
+          locked_at: new Date(),
+          expires_at: new Date(Date.now() + this.lockTimeout)
+        },
+        { returning: true }
+      ).catch(() => ({ rows: [] })); // Ignore if table doesn't exist
+      
+      const acquired = rows.length > 0;
       
       if (acquired) {
         this.logger.info('Queue processing lock acquired', { lockId: this.lockId });
@@ -616,7 +736,11 @@ class QueueService {
     if (!this.lockId) return;
     
     try {
-      await db.releaseQueueLock(this.lockId);
+      await db.query(
+        'DELETE FROM queue_locks WHERE lock_id = $1',
+        [this.lockId]
+      ).catch(() => {}); // Ignore if table doesn't exist
+      
       this.logger.info('Queue processing lock released', { lockId: this.lockId });
     } catch (error) {
       this.logger.error('Failed to release lock', error);
@@ -648,7 +772,28 @@ class QueueService {
   // Get queue statistics
   async getQueueStats() {
     try {
-      const stats = await db.getQueueStats();
+      const { rows } = await db.query(`
+        SELECT 
+          status, 
+          COUNT(*) as count
+        FROM hubspot_webhook_queue
+        GROUP BY status
+      `);
+      
+      const stats = {
+        pending: 0,
+        processing: 0,
+        completed: 0,
+        failed: 0,
+        total: 0
+      };
+      
+      rows.forEach(row => {
+        const status = row.status.toLowerCase();
+        const count = parseInt(row.count);
+        stats[status] = count;
+        stats.total += count;
+      });
       
       return {
         ...stats,
@@ -659,6 +804,81 @@ class QueueService {
     } catch (error) {
       this.logger.error('Failed to get queue stats', error);
       throw new QueueError('Failed to retrieve queue statistics', error);
+    }
+  }
+  
+  // Get queue status (alias for getQueueStats)
+  async getQueueStatus() {
+    return this.getQueueStats();
+  }
+  
+  // Process queue batch (for compatibility)
+  async processQueue(limit) {
+    return this.processPendingItems({ batchSize: limit });
+  }
+  
+  // Get failed items with pagination
+  async getFailedItems(page = 1, limit = 20) {
+    try {
+      const offset = (page - 1) * limit;
+      
+      // Get total count
+      const countResult = await db.query(
+        'SELECT COUNT(*) as total FROM hubspot_webhook_queue WHERE status = $1',
+        ['failed']
+      );
+      const total = parseInt(countResult.rows[0].total);
+      
+      // Get paginated results
+      const { rows } = await db.query(
+        `SELECT * FROM hubspot_webhook_queue 
+         WHERE status = $1 
+         ORDER BY created_at DESC 
+         LIMIT $2 OFFSET $3`,
+        ['failed', limit, offset]
+      );
+      
+      return {
+        items: rows,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      };
+    } catch (error) {
+      this.logger.error('Failed to get failed items', error);
+      throw new QueueError('Failed to retrieve failed items', error);
+    }
+  }
+  
+  // Retry a failed item
+  async retryItem(itemId) {
+    try {
+      const { rows } = await db.update(
+        'hubspot_webhook_queue',
+        {
+          status: 'pending',
+          attempts: 0,
+          next_retry_at: null,
+          error_message: null,
+          error_details: null
+        },
+        { id: itemId },
+        { returning: true }
+      );
+      
+      if (rows.length === 0) {
+        return null;
+      }
+      
+      this.logger.info('Queue item queued for retry', { itemId });
+      
+      return rows[0];
+    } catch (error) {
+      this.logger.error('Failed to retry queue item', error, { itemId });
+      throw new QueueError('Failed to retry item', error);
     }
   }
   
@@ -688,4 +908,4 @@ class QueueService {
 const queueService = new QueueService();
 
 // Export both the instance and the class
-export { queueService, QueueService };
+export { queueService as default, QueueService };

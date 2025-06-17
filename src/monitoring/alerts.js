@@ -1,95 +1,6 @@
-/**
- * Send a webhook alert
- * @param {string} alertType - Type of alert
- * @param {string} severity - Alert severity
- * @param {string} message - Alert message
- * @param {Object} context - Alert context
- */
-function sendWebhookAlert(alertType, severity, message, context) {
-  // Skip webhook alerts in development unless explicitly enabled
-  if (config.isDevelopment && !process.env.ENABLE_DEV_WEBHOOKS) {
-    logger.debug('Webhook alert skipped in development', { alertType, message });
-    return;
-  }
-  
-  // In production, this would POST to a webhook URL
-  // For now, just log the webhook alert
-  logger.info('Would send webhook alert', { 
-    alertType,
-    severity,
-    message,
-    webhook: process.env.ALERT_WEBHOOK_URL || 'https://example.com/webhook'
-  });
-  
-  // TODO: Implement actual webhook sending in production
-}
-
-/**
- * Check if system resource usage exceeds thresholds and trigger alerts if needed
- */
-function checkSystemResources() {
-  // Check memory usage
-  const memoryUsage = process.memoryUsage();
-  const heapUsedPercent = (memoryUsage.heapUsed / memoryUsage.heapTotal) * 100;
-  
-  if (isThresholdExceeded(ALERT_TYPES.SYSTEM.MEMORY_HIGH, heapUsedPercent)) {
-    triggerAlert(ALERT_TYPES.SYSTEM.MEMORY_HIGH, {
-      usagePercent: heapUsedPercent.toFixed(2),
-      heapUsed: formatBytes(memoryUsage.heapUsed),
-      heapTotal: formatBytes(memoryUsage.heapTotal),
-      rss: formatBytes(memoryUsage.rss)
-    });
-  }
-  
-  // CPU usage would require an external module to measure accurately
-  // This is a placeholder for actual implementation
-}
-
-/**
- * Format bytes to human-readable format
- * @param {number} bytes - Bytes to format
- * @returns {string} Formatted string
- */
-function formatBytes(bytes) {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  while (bytes >= 1024 && i < units.length - 1) {
-    bytes /= 1024;
-    i++;
-  }
-  return `${bytes.toFixed(2)} ${units[i]}`;
-}
-
-/**
- * Initialize alert monitoring
- * Sets up periodic checks and event listeners
- */
-function initializeAlertMonitoring() {
-  logger.info('Initializing alert monitoring...');
-  
-  // Set up periodic system resource checks
-  if (config.isProduction) {
-    setInterval(checkSystemResources, 60000); // Every minute
-  }
-  
-  // Trigger server start alert
-  triggerAlert(ALERT_TYPES.SYSTEM.SERVER_START, {
-    environment: config.env,
-    version: config.unmessy.version
-  });
-  
-  // Set up process exit handler for server stop alert
-  process.on('exit', () => {
-    triggerAlert(ALERT_TYPES.SYSTEM.SERVER_STOP, {
-      environment: config.env,
-      version: config.unmessy.version
-    });
-  });
-  
-  logger.info('Alert monitoring initialized');
-}// src/monitoring/alerts.js
-const config = require('../core/config');
-const { createServiceLogger } = require('../core/logger');
+// src/monitoring/alerts.js
+import { config } from '../core/config.js';
+import { createServiceLogger } from '../core/logger.js';
 
 // Create logger instance
 const logger = createServiceLogger('alerts');
@@ -97,7 +8,7 @@ const logger = createServiceLogger('alerts');
 /**
  * Alert severity levels
  */
-const SEVERITY = {
+export const SEVERITY = {
   CRITICAL: 'critical',
   HIGH: 'high',
   MEDIUM: 'medium',
@@ -108,7 +19,7 @@ const SEVERITY = {
 /**
  * Alert channels - can be extended with other notification methods
  */
-const CHANNELS = {
+export const CHANNELS = {
   EMAIL: 'email',
   WEBHOOK: 'webhook',
   LOG: 'log' // Always available fallback
@@ -117,7 +28,7 @@ const CHANNELS = {
 /**
  * Alert types grouped by category
  */
-const ALERT_TYPES = {
+export const ALERT_TYPES = {
   // System health alerts
   SYSTEM: {
     SERVER_START: 'server_start',
@@ -467,7 +378,7 @@ function canTriggerAlert(alertType) {
  * @param {number} value - Current value to check against threshold
  * @returns {boolean} Whether the threshold is exceeded
  */
-function isThresholdExceeded(alertType, value) {
+export function isThresholdExceeded(alertType, value) {
   const config = alertConfig[alertType];
   if (!config || !config.threshold) {
     return true; // No threshold defined, so always trigger
@@ -482,7 +393,7 @@ function isThresholdExceeded(alertType, value) {
  * @param {Object} context - Context data for alert message
  * @returns {boolean} Whether the alert was triggered
  */
-function triggerAlert(alertType, context = {}) {
+export function triggerAlert(alertType, context = {}) {
   if (!canTriggerAlert(alertType)) {
     return false;
   }
@@ -568,8 +479,99 @@ function sendEmailAlert(alertType, severity, message, context) {
   // TODO: Implement actual email sending in production
 }
 
+/**
+ * Send a webhook alert
+ * @param {string} alertType - Type of alert
+ * @param {string} severity - Alert severity
+ * @param {string} message - Alert message
+ * @param {Object} context - Alert context
+ */
+function sendWebhookAlert(alertType, severity, message, context) {
+  // Skip webhook alerts in development unless explicitly enabled
+  if (config.isDevelopment && !process.env.ENABLE_DEV_WEBHOOKS) {
+    logger.debug('Webhook alert skipped in development', { alertType, message });
+    return;
+  }
+  
+  // In production, this would POST to a webhook URL
+  // For now, just log the webhook alert
+  logger.info('Would send webhook alert', { 
+    alertType,
+    severity,
+    message,
+    webhook: process.env.ALERT_WEBHOOK_URL || 'https://example.com/webhook'
+  });
+  
+  // TODO: Implement actual webhook sending in production
+}
+
+/**
+ * Check if system resource usage exceeds thresholds and trigger alerts if needed
+ */
+export function checkSystemResources() {
+  // Check memory usage
+  const memoryUsage = process.memoryUsage();
+  const heapUsedPercent = (memoryUsage.heapUsed / memoryUsage.heapTotal) * 100;
+  
+  if (isThresholdExceeded(ALERT_TYPES.SYSTEM.MEMORY_HIGH, heapUsedPercent)) {
+    triggerAlert(ALERT_TYPES.SYSTEM.MEMORY_HIGH, {
+      usagePercent: heapUsedPercent.toFixed(2),
+      heapUsed: formatBytes(memoryUsage.heapUsed),
+      heapTotal: formatBytes(memoryUsage.heapTotal),
+      rss: formatBytes(memoryUsage.rss)
+    });
+  }
+  
+  // CPU usage would require an external module to measure accurately
+  // This is a placeholder for actual implementation
+}
+
+/**
+ * Format bytes to human-readable format
+ * @param {number} bytes - Bytes to format
+ * @returns {string} Formatted string
+ */
+function formatBytes(bytes) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  while (bytes >= 1024 && i < units.length - 1) {
+    bytes /= 1024;
+    i++;
+  }
+  return `${bytes.toFixed(2)} ${units[i]}`;
+}
+
+/**
+ * Initialize alert monitoring
+ * Sets up periodic checks and event listeners
+ */
+export function initializeAlertMonitoring() {
+  logger.info('Initializing alert monitoring...');
+  
+  // Set up periodic system resource checks
+  if (config.isProduction) {
+    setInterval(checkSystemResources, 60000); // Every minute
+  }
+  
+  // Trigger server start alert
+  triggerAlert(ALERT_TYPES.SYSTEM.SERVER_START, {
+    environment: config.env,
+    version: config.unmessy.version
+  });
+  
+  // Set up process exit handler for server stop alert
+  process.on('exit', () => {
+    triggerAlert(ALERT_TYPES.SYSTEM.SERVER_STOP, {
+      environment: config.env,
+      version: config.unmessy.version
+    });
+  });
+  
+  logger.info('Alert monitoring initialized');
+}
+
 // Export alert system
-module.exports = {
+export default {
   SEVERITY,
   CHANNELS,
   ALERT_TYPES,

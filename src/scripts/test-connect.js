@@ -1,7 +1,7 @@
 // scripts/test-connect.js
-const { db } = require('../src/core/db');
-const config = require('../src/core/config');
-const { createServiceLogger } = require('../src/core/logger');
+import db from '../src/core/db.js';
+import config from '../src/core/config.js';
+import { createServiceLogger } from '../src/core/logger.js';
 
 // Create logger instance
 const logger = createServiceLogger('test-connect');

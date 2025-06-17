@@ -1,20 +1,20 @@
 // src/api/server.js
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const compression = require('compression');
-const { v4: uuidv4 } = require('uuid');
-const config = require('../core/config');
-const db = require('../core/db');
-const logger = require('../core/logger');
-const { errorHandler, notFoundHandler, setupUncaughtErrorHandlers } = require('./middleware/error-handler');
-const { requestLogger } = require('./middleware/request-logger');
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import compression from 'compression';
+import { v4 as uuidv4 } from 'uuid';
+import { config } from '../core/config.js';
+import db from '../core/db.js';
+import logger from '../core/logger.js';
+import { errorHandler, notFoundHandler, setupUncaughtErrorHandlers } from './middleware/error-handler.js';
+import { requestLogger } from './middleware/request-logger.js';
 
 // Import routes
-const validateRoutes = require('./routes/validate');
-const hubspotWebhookRoutes = require('./routes/hubspot-webhook');
-const healthRoutes = require('./routes/health');
-const adminRoutes = require('./routes/admin');
+import validateRoutes from './routes/validate.js';
+import hubspotWebhookRoutes from './routes/hubspot-webhook.js';
+import healthRoutes from './routes/health.js';
+import adminRoutes from './routes/admin.js';
 
 // Initialize express app
 const app = express();
@@ -194,13 +194,14 @@ function setupGracefulShutdown(server) {
 }
 
 // For testing exports
-module.exports = {
+export {
   initializeServer,
   connectServices,
   startServer
 };
 
 // Auto-start server if this file is run directly
-if (require.main === module) {
+// Check if this module is the main module
+if (import.meta.url === `file://${process.argv[1]}`) {
   startServer();
 }

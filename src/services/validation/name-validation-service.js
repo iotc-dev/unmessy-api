@@ -1,5 +1,5 @@
 // src/services/validation/name-validation-service.js
-import { db } from '../../core/db.js';
+import db from '../../core/db.js';
 import { config } from '../../core/config.js';
 import { createServiceLogger } from '../../core/logger.js';
 import { ValidationError, DatabaseError } from '../../core/errors.js';
@@ -512,12 +512,15 @@ class NameValidationService {
     result.um_name = `${result.um_first_name} ${result.um_last_name}`.trim();
     result.um_name_status = result.wasCorrected ? 'Changed' : 'Unchanged';
     result.um_name_format = result.formatValid ? 'Valid' : 'Invalid';
+    result.um_honorific = result.honorific;
+    result.um_suffix = result.suffix;
+    result.um_middle_name = result.middleName;
     
     return result;
   }
   
   // Validate separate names
-  async validateSeparateNames(firstName, lastName) {
+  async validateSeparateNames(firstName, lastName, options = {}) {
     this.logger.debug('Validating separate names', { firstName, lastName });
     
     // Handle null/empty
@@ -540,7 +543,10 @@ class NameValidationService {
         um_last_name: '',
         um_name: '',
         um_name_status: 'Unchanged',
-        um_name_format: 'Invalid'
+        um_name_format: 'Invalid',
+        um_honorific: '',
+        um_suffix: '',
+        um_middle_name: ''
       };
     }
     
@@ -685,6 +691,9 @@ class NameValidationService {
     result.um_name = `${result.um_first_name} ${result.um_last_name}`.trim();
     result.um_name_status = result.wasCorrected ? 'Changed' : 'Unchanged';
     result.um_name_format = result.formatValid ? 'Valid' : 'Invalid';
+    result.um_honorific = result.honorific;
+    result.um_suffix = result.suffix;
+    result.um_middle_name = result.middleName;
     
     return result;
   }
@@ -716,7 +725,13 @@ class NameValidationService {
   // Cache operations
   async checkNameCache(name) {
     try {
-      const { data, error } = await db.getNameValidation(name);
+      const { rows } = await db.select(
+        'name_validations',
+        { original_name: name },
+        { limit: 1 }
+      );
+      
+      const data = rows[0];
       
       if (data) {
         return {
@@ -741,6 +756,9 @@ class NameValidationService {
           um_name: `${data.first_name} ${data.last_name}`.trim(),
           um_name_status: 'Unchanged',
           um_name_format: data.format_valid ? 'Valid' : 'Invalid',
+          um_honorific: data.honorific || '',
+          um_suffix: data.suffix || '',
+          um_middle_name: data.middle_name || '',
           cacheDate: data.date_validated,
           cacheDateEpochMs: data.date_validated_epoch_ms
         };
@@ -758,7 +776,7 @@ class NameValidationService {
       const now = new Date();
       const epochMs = now.getTime();
       
-      await db.saveNameValidation({
+      await db.insert('name_validations', {
         original_name: name,
         first_name: validationResult.firstName,
         last_name: validationResult.lastName,
@@ -779,10 +797,16 @@ class NameValidationService {
       
       this.logger.debug('Name validation saved to cache', { name, clientId });
     } catch (error) {
-      this.logger.error('Failed to save name validation', error, { name });
+      // Handle duplicate key errors gracefully
+      if (error.code !== '23505') { // PostgreSQL unique violation
+        this.logger.error('Failed to save name validation', error, { name });
+      }
     }
   }
 }
 
-// Export the class for use in validation-service.js
-export { NameValidationService };
+// Create singleton instance
+const nameValidationService = new NameValidationService();
+
+// Export the class and instance
+export { nameValidationService, NameValidationService };

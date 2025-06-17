@@ -1,17 +1,18 @@
 // src/api/routes/health.js
-const express = require('express');
-const router = express.Router();
-const { asyncHandler } = require('../middleware/error-handler');
-const { authMiddleware } = require('../middleware/auth');
-const db = require('../../core/db');
-const config = require('../../core/config');
-const { createServiceLogger } = require('../../core/logger');
-const { zeroBounceService } = require('../../services/external/zerobounce');
-const { openCageService } = require('../../services/external/opencage');
-const clientService = require('../../services/client-service');
+import express from 'express';
+import { asyncHandler } from '../middleware/error-handler.js';
+import { authMiddleware } from '../middleware/auth.js';
+import db from '../../core/db.js';
+import { config } from '../../core/config.js';
+import { createServiceLogger } from '../../core/logger.js';
+import { zeroBounceService } from '../../services/external/zerobounce.js';
+import { openCageService } from '../../services/external/opencage.js';
+import clientService from '../../services/client-service.js';
 
 // Create logger instance
 const logger = createServiceLogger('health-api');
+
+const router = express.Router();
 
 /**
  * Basic health check endpoint
@@ -391,4 +392,4 @@ async function checkReadiness() {
   }
 }
 
-module.exports = router;
+export default router;

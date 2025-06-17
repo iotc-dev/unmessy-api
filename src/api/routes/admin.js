@@ -1,14 +1,16 @@
 // src/api/routes/admin.js
-const express = require('express');
+import express from 'express';
+import Joi from 'joi';
+import { asyncHandler } from '../middleware/error-handler.js';
+import { authMiddleware } from '../middleware/auth.js';
+import { validate } from '../middleware/validate-input.js';
+import rateLimit from '../middleware/rate-limit.js';
+import clientService from '../../services/client-service.js';
+import queueService from '../../services/queue-service.js';
+import db from '../../core/db.js';
+import { NotFoundError, AuthorizationError } from '../../core/errors.js';
+
 const router = express.Router();
-const { asyncHandler } = require('../middleware/error-handler');
-const { authMiddleware } = require('../middleware/auth');
-const { validate } = require('../middleware/validate-input');
-const rateLimit = require('../middleware/rate-limit');
-const clientService = require('../../services/client-service');
-const queueService = require('../../services/queue-service');
-const db = require('../../core/db');
-const { NotFoundError, AuthorizationError } = require('../../core/errors');
 
 // Apply authentication to all admin routes
 // Require admin privileges
@@ -408,4 +410,4 @@ const clientSchema = Joi.object({
   is_admin: Joi.boolean().default(false)
 });
 
-module.exports = router;
+export default router;

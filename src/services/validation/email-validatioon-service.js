@@ -1,5 +1,5 @@
 // src/services/validation/email-validation-service.js
-import { db } from '../../core/db.js';
+import db from '../../core/db.js';
 import { config } from '../../core/config.js';
 import { createServiceLogger } from '../../core/logger.js';
 import { 
@@ -75,11 +75,11 @@ class EmailValidationService {
   generateUmCheckId(clientId) {
     const epochTime = Date.now();
     const lastSixDigits = String(epochTime).slice(-6);
-    const clientIdStr = clientId || config.clients.defaultClientId;
+    const clientIdStr = clientId || config.clients.defaultClientId || '0001';
     const firstThreeDigits = String(epochTime).slice(0, 3);
     const sum = [...firstThreeDigits].reduce((acc, digit) => acc + parseInt(digit), 0);
     const checkDigit = String(sum * parseInt(clientIdStr)).padStart(3, '0').slice(-3);
-    return Number(`${lastSixDigits}${clientIdStr}${checkDigit}${config.unmessy.version}`);
+    return Number(`${lastSixDigits}${clientIdStr}${checkDigit}${config.unmessy.version.replace(/\./g, '')}`);
   }
   
   // Email typo correction
@@ -202,156 +202,6 @@ class EmailValidationService {
     }, clientId);
   }
   
-  // Full validation with external services
-  async validateEmail(email, options = {}) {
-    const { 
-      skipZeroBounce = false, 
-      clientId = null,
-      timeout = config.services.zeroBounce.timeout
-    } = options;
-    
-    this.logger.debug('Starting email validation', { 
-      email, 
-      skipZeroBounce, 
-      clientId 
-    });
-    
-    // Quick validation first
-    const quickResult = await this.quickValidate(email, clientId);
-    
-    // If invalid format or domain, return immediately
-    if (!quickResult.formatValid || quickResult.isInvalidDomain) {
-      this.logger.debug('Email failed quick validation', {
-        email,
-        formatValid: quickResult.formatValid,
-        isInvalidDomain: quickResult.isInvalidDomain
-      });
-      return quickResult;
-    }
-    
-    // Check cache
-    const cached = await this.checkEmailCache(quickResult.currentEmail);
-    if (cached) {
-      this.logger.debug('Email found in cache', { email: quickResult.currentEmail });
-      return { ...cached, isFromCache: true };
-    }
-    
-    // Enhance with external validation if enabled
-    let result = { ...quickResult };
-    
-    if (!skipZeroBounce && config.services.zeroBounce.enabled && quickResult.recheckNeeded) {
-      try {
-        const zbResponse = await ErrorRecovery.withTimeout(
-          this.zeroBounce.validateEmail(quickResult.currentEmail),
-          timeout,
-          'ZeroBounce validation'
-        );
-        
-        // Parse ZeroBounce response
-        const parsedResponse = this.zeroBounce.parseResponse(zbResponse);
-        
-        // Update result with ZeroBounce data
-        result = this.mergeWithZeroBounceResult(result, parsedResponse);
-        
-        // Handle ZeroBounce email suggestion
-        if (parsedResponse.did_you_mean && parsedResponse.did_you_mean !== quickResult.currentEmail) {
-          this.logger.info('ZeroBounce suggested email correction', {
-            original: quickResult.currentEmail,
-            suggested: parsedResponse.did_you_mean
-          });
-          
-          // Validate the suggested email
-          const suggestedValidation = await this.quickValidate(parsedResponse.did_you_mean, clientId);
-          if (suggestedValidation.status === 'valid') {
-            result.suggestedEmail = parsedResponse.did_you_mean;
-            result.um_email = parsedResponse.did_you_mean;
-            result.wasCorrected = true;
-            result.um_email_status = 'Changed';
-          }
-        }
-        
-      } catch (error) {
-        this.logger.warn('External email validation failed', error, {
-          email: quickResult.currentEmail,
-          service: 'ZeroBounce'
-        });
-        
-        // If domain is valid in our database, consider it valid despite ZeroBounce failure
-        if (result.domainValid) {
-          result.status = 'valid';
-          result.recheckNeeded = false;
-          result.um_bounce_status = 'Unlikely to bounce';
-        }
-        
-        result.validationSteps.push({
-          step: 'zerobounce_check',
-          error: error.message,
-          fallbackToDatabase: result.domainValid
-        });
-      }
-    }
-    
-    // Save to cache if valid
-    if (result.status === 'valid') {
-      await this.saveEmailCache(email, result, clientId);
-    }
-    
-    return result;
-  }
-  
-  // Merge results with ZeroBounce response
-  mergeWithZeroBounceResult(quickResult, zbParsed) {
-    // Determine final status
-    let finalStatus = quickResult.status;
-    let umBounceStatus = 'Unknown';
-    
-    if (zbParsed.status === 'valid') {
-      finalStatus = 'valid';
-      umBounceStatus = 'Unlikely to bounce';
-    } else if (zbParsed.status === 'invalid') {
-      finalStatus = 'invalid';
-      umBounceStatus = 'Likely to bounce';
-    } else if (zbParsed.catch_all) {
-      // Catch-all addresses are technically valid but risky
-      finalStatus = 'valid';
-      umBounceStatus = 'Catch-all domain';
-    }
-    
-    return {
-      ...quickResult,
-      status: finalStatus,
-      subStatus: zbParsed.sub_status || quickResult.subStatus,
-      
-      // ZeroBounce specific fields
-      freeEmail: zbParsed.free_email,
-      roleEmail: zbParsed.role,
-      catchAll: zbParsed.catch_all,
-      disposable: zbParsed.disposable,
-      toxic: zbParsed.toxic,
-      doNotMail: zbParsed.do_not_mail,
-      score: zbParsed.score,
-      mxFound: zbParsed.mx_found,
-      mxRecord: zbParsed.mx_record,
-      smtpProvider: zbParsed.smtp_provider,
-      
-      // Update unmessy fields
-      um_bounce_status: umBounceStatus,
-      recheckNeeded: false, // We got a definitive answer
-      
-      // Validation steps
-      validationSteps: [
-        ...quickResult.validationSteps,
-        {
-          step: 'zerobounce_validation',
-          provider: 'zerobounce',
-          passed: finalStatus === 'valid',
-          status: zbParsed.status,
-          processedAt: zbParsed.processed_at
-        }
-      ]
-    };
-  }
-  
   // Build validation result
   buildValidationResult(originalEmail, validationData, clientId) {
     const now = new Date();
@@ -402,7 +252,13 @@ class EmailValidationService {
   // Cache operations
   async checkEmailCache(email) {
     try {
-      const { data, error } = await db.getEmailValidation(email);
+      const { rows } = await db.select(
+        'email_validations',
+        { email: email.toLowerCase() },
+        { limit: 1 }
+      );
+      
+      const data = rows[0];
       
       if (data) {
         return {
@@ -436,8 +292,8 @@ class EmailValidationService {
     }
     
     try {
-      await db.saveEmailValidation({
-        email,
+      await db.insert('email_validations', {
+        email: email.toLowerCase(),
         um_email: validationResult.um_email || validationResult.currentEmail,
         um_email_status: validationResult.um_email_status,
         um_bounce_status: validationResult.um_bounce_status,
@@ -448,15 +304,16 @@ class EmailValidationService {
       
       this.logger.debug('Email validation saved to cache', { email, clientId });
     } catch (error) {
-      this.logger.error('Failed to save email validation', error, { email });
+      // Handle duplicate key errors gracefully
+      if (error.code !== '23505') { // PostgreSQL unique violation
+        this.logger.error('Failed to save email validation', error, { email });
+      }
     }
-  }
-  
-  // Format date string
-  formatDateString(date) {
-    return date.toISOString();
   }
 }
 
-// Export the class for use in validation-service.js
-export { EmailValidationService };
+// Create singleton instance
+const emailValidationService = new EmailValidationService();
+
+// Export the class and instance
+export { emailValidationService, EmailValidationService };

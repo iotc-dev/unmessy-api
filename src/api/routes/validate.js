@@ -1,17 +1,19 @@
 // src/api/routes/validate.js
-const express = require('express');
-const router = express.Router();
-const { asyncHandler } = require('../middleware/error-handler');
-const { authMiddleware } = require('../middleware/auth');
-const { validate } = require('../middleware/validate-input');
-const { ValidationError, RateLimitError } = require('../../core/errors');
-const { createServiceLogger } = require('../../core/logger');
-const clientService = require('../../services/client-service');
-const validationService = require('../../services/validation-service');
-const config = require('../../core/config');
+import express from 'express';
+import Joi from 'joi';
+import { asyncHandler } from '../middleware/error-handler.js';
+import { authMiddleware } from '../middleware/auth.js';
+import { validate } from '../middleware/validate-input.js';
+import { ValidationError, RateLimitError } from '../../core/errors.js';
+import { createServiceLogger } from '../../core/logger.js';
+import clientService from '../../services/client-service.js';
+import validationService from '../../services/validation-service.js';
+import { config } from '../../core/config.js';
 
 // Create logger instance
 const logger = createServiceLogger('validation-api');
+
+const router = express.Router();
 
 /**
  * Email validation endpoint
@@ -564,4 +566,4 @@ router.get('/field-mappings',
   })
 );
 
-module.exports = router;
+export default router;

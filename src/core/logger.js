@@ -1,7 +1,8 @@
 // src/core/logger.js
 import winston from 'winston';
-import { format } from 'winston';
 import DailyRotateFile from 'winston-daily-rotate-file';
+
+const { format } = winston;
 
 // Custom format for structured logging
 const structuredFormat = format.printf(({ 
@@ -105,7 +106,7 @@ const createLogger = () => {
 const logger = createLogger();
 
 // Specialized loggers for different contexts
-class Logger {
+export class Logger {
   constructor(context = {}) {
     this.context = context;
     this.logger = logger;
@@ -349,7 +350,6 @@ if (process.env.NODE_ENV === 'production') {
 
 // Export the main logger and Logger class
 export default logger;
-export { Logger };
 
 // Utility function to sanitize sensitive data before logging
 export const sanitizeLogData = (data) => {

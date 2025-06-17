@@ -3,12 +3,18 @@
 // A comprehensive health check script for the Unmessy API
 // Can be run standalone or as part of a monitoring system
 
-const fetch = require('node-fetch');
-const dotenv = require('dotenv');
-const { createClient } = require('@supabase/supabase-js');
-const fs = require('fs');
-const path = require('path');
-const { program } = require('commander');
+import fetch from 'node-fetch';
+import dotenv from 'dotenv';
+import { createClient } from '@supabase/supabase-js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
+import { program } from 'commander';
+
+// Get current file's directory (ES modules equivalent of __dirname)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Load environment variables
 dotenv.config();
@@ -220,8 +226,11 @@ async function checkDatabase() {
     
     console.log(`${colors.green}✓ Database connection successful${colors.reset}`);
     
-    // Get database version
-    const { data: versionData, error: versionError } = await supabase.rpc('get_pg_version');
+    // Get database version (Note: This RPC might not exist, so we handle it gracefully)
+    const { data: versionData, error: versionError } = await supabase.rpc('get_pg_version').catch(() => ({ 
+      data: null, 
+      error: 'Version check not available' 
+    }));
     
     // Add to report
     healthReport.checks.database = {
@@ -399,7 +408,7 @@ async function checkQueue() {
     }
     
     // Check queue status via API
-    const response = await fetch(`${options.url}/api/admin/queue-status`, {
+    const response = await fetch(`${options.url}/api/admin/queue/status`, {
       headers: {
         'X-API-Key': options.key
       }
@@ -418,8 +427,8 @@ async function checkQueue() {
     };
     
     // Check for queue backlog
-    const pendingCount = data.queue?.pending || 0;
-    const failedCount = data.queue?.failed || 0;
+    const pendingCount = data.pending || 0;
+    const failedCount = data.failed || 0;
     
     if (pendingCount > 50) {
       console.log(`${colors.yellow}⚠ Queue has ${pendingCount} pending items${colors.reset}`);

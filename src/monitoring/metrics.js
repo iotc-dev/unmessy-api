@@ -1,9 +1,10 @@
 // src/monitoring/metrics.js
-const { createServiceLogger } = require('../core/logger');
-const { ErrorRecovery } = require('../core/errors');
-const config = require('../core/config');
-const db = require('../core/db');
-const alerts = require('./alerts');
+import os from 'os';
+import { createServiceLogger } from '../core/logger.js';
+import { ErrorRecovery } from '../core/errors.js';
+import { config } from '../core/config.js';
+import db from '../core/db.js';
+import * as alerts from './alerts.js';
 
 // Create logger instance
 const logger = createServiceLogger('metrics');
@@ -11,7 +12,7 @@ const logger = createServiceLogger('metrics');
 /**
  * Metric types for different aspects of the system
  */
-const METRIC_TYPES = {
+export const METRIC_TYPES = {
   // API metrics
   API: {
     REQUEST_COUNT: 'api.request.count',
@@ -103,7 +104,7 @@ const METRIC_TYPES = {
 /**
  * Aggregation types for metrics
  */
-const AGGREGATION_TYPES = {
+export const AGGREGATION_TYPES = {
   COUNT: 'count',
   GAUGE: 'gauge',
   HISTOGRAM: 'histogram',
@@ -113,7 +114,7 @@ const AGGREGATION_TYPES = {
 /**
  * Time windows for aggregating metrics
  */
-const TIME_WINDOWS = {
+export const TIME_WINDOWS = {
   MINUTE: 60,
   FIVE_MINUTES: 300,
   FIFTEEN_MINUTES: 900,
@@ -156,7 +157,7 @@ const metricsStorage = {
  * @param {Object} dimensions - Additional dimensions for the metric
  * @param {string} aggregationType - Type of aggregation from AGGREGATION_TYPES
  */
-function recordMetric(metricType, value, dimensions = {}, aggregationType = AGGREGATION_TYPES.COUNT) {
+export function recordMetric(metricType, value, dimensions = {}, aggregationType = AGGREGATION_TYPES.COUNT) {
   // Skip metrics in test environment
   if (config.isTest) {
     return;
@@ -423,7 +424,7 @@ function checkAlertConditions(metric) {
  * @param {number} window - Time window in seconds
  * @returns {Object} Aggregated metric or null if not found
  */
-function getAggregatedMetric(metricType, dimensions, window) {
+export function getAggregatedMetric(metricType, dimensions, window) {
   const dimensionKey = JSON.stringify(dimensions);
   const metricKey = `${metricType}:${dimensionKey}`;
   
@@ -435,7 +436,7 @@ function getAggregatedMetric(metricType, dimensions, window) {
  * @param {number} window - Time window in seconds
  * @returns {Object[]} Array of aggregated metrics
  */
-function getAllAggregatedMetrics(window) {
+export function getAllAggregatedMetrics(window) {
   return Object.values(metricsStorage.aggregated[window] || {});
 }
 
@@ -445,7 +446,7 @@ function getAllAggregatedMetrics(window) {
  * @param {number} window - Time window in seconds
  * @returns {Object[]} Filtered metrics
  */
-function getFilteredMetrics(filters, window = TIME_WINDOWS.FIVE_MINUTES) {
+export function getFilteredMetrics(filters, window = TIME_WINDOWS.FIVE_MINUTES) {
   const metrics = getAllAggregatedMetrics(window);
   
   return metrics.filter(metric => {
@@ -478,7 +479,7 @@ function getFilteredMetrics(filters, window = TIME_WINDOWS.FIVE_MINUTES) {
  * @param {Object} res - Express response object
  * @param {number} duration - Request duration in milliseconds
  */
-function recordApiRequest(req, res, duration) {
+export function recordApiRequest(req, res, duration) {
   const endpoint = req.path;
   const method = req.method;
   const statusCode = res.statusCode;
@@ -526,7 +527,7 @@ function recordApiRequest(req, res, duration) {
  * @param {number} duration - Validation duration in milliseconds
  * @param {string} clientId - Client ID
  */
-function recordValidation(validationType, success, corrected, duration, clientId) {
+export function recordValidation(validationType, success, corrected, duration, clientId) {
   // Record count
   recordMetric(METRIC_TYPES.VALIDATION[`${validationType.toUpperCase()}_COUNT`], 1, {
     clientId,
@@ -558,7 +559,7 @@ function recordValidation(validationType, success, corrected, duration, clientId
  * @param {number} duration - Request duration in milliseconds
  * @param {string} errorMessage - Error message if failed
  */
-function recordExternalRequest(service, operation, success, duration, errorMessage = null) {
+export function recordExternalRequest(service, operation, success, duration, errorMessage = null) {
   const serviceName = service.toUpperCase();
   
   // Record request count
@@ -589,7 +590,7 @@ function recordExternalRequest(service, operation, success, duration, errorMessa
  * @param {boolean} success - Whether query was successful
  * @param {number} duration - Query duration in milliseconds
  */
-function recordDatabaseQuery(operation, table, success, duration) {
+export function recordDatabaseQuery(operation, table, success, duration) {
   // Record query count
   recordMetric(METRIC_TYPES.DATABASE.QUERY_COUNT, 1, {
     operation,
@@ -617,7 +618,7 @@ function recordDatabaseQuery(operation, table, success, duration) {
  * Record queue metrics
  * @param {Object} queueStats - Queue statistics
  */
-function recordQueueMetrics(queueStats) {
+export function recordQueueMetrics(queueStats) {
   // Record queue sizes
   recordMetric(METRIC_TYPES.QUEUE.PENDING_COUNT, queueStats.pending || 0, {}, AGGREGATION_TYPES.GAUGE);
   recordMetric(METRIC_TYPES.QUEUE.PROCESSING_COUNT, queueStats.processing || 0, {}, AGGREGATION_TYPES.GAUGE);
@@ -638,7 +639,7 @@ function recordQueueMetrics(queueStats) {
 /**
  * Record system metrics
  */
-function recordSystemMetrics() {
+export function recordSystemMetrics() {
   try {
     // Record memory usage
     const memoryUsage = process.memoryUsage();
@@ -663,7 +664,7 @@ function recordSystemMetrics() {
  * Record client usage metrics
  * @param {Object} client - Client object with usage statistics
  */
-function recordClientUsageMetrics(client) {
+export function recordClientUsageMetrics(client) {
   if (!client || !client.client_id) return;
   
   const clientId = client.client_id.toString();
@@ -701,7 +702,7 @@ function recordClientUsageMetrics(client) {
 /**
  * Initialize metrics collection and periodic tasks
  */
-function initializeMetrics() {
+export function initializeMetrics() {
   logger.info('Initializing metrics collection...');
   
   // Only collect metrics in production if enabled
@@ -794,7 +795,7 @@ async function getQueueStats() {
 /**
  * Express middleware for recording API metrics
  */
-function metricsMiddleware() {
+export function metricsMiddleware() {
   return (req, res, next) => {
     // Skip metrics for health checks in production
     if (config.isProduction && req.path.includes('/health')) {
@@ -824,7 +825,7 @@ function metricsMiddleware() {
 }
 
 // Export metrics functions and types
-module.exports = {
+export default {
   METRIC_TYPES,
   AGGREGATION_TYPES,
   TIME_WINDOWS,

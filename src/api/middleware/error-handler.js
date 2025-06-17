@@ -1,6 +1,6 @@
 // src/api/middleware/error-handler.js
-const { createServiceLogger } = require('../../core/logger');
-const {
+import { createServiceLogger } from '../../core/logger.js';
+import {
   AppError,
   ValidationError,
   AuthenticationError,
@@ -9,8 +9,8 @@ const {
   NotFoundError,
   DatabaseError,
   ExternalServiceError
-} = require('../../core/errors');
-const config = require('../../core/config');
+} from '../../core/errors.js';
+import { config } from '../../core/config.js';
 
 // Create logger instance
 const logger = createServiceLogger('error-handler');
@@ -21,7 +21,7 @@ const logger = createServiceLogger('error-handler');
  * @param {Function} fn - The async route handler function
  * @returns {Function} Express middleware function
  */
-const asyncHandler = (fn) => (req, res, next) => {
+export const asyncHandler = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
 
@@ -75,7 +75,7 @@ const formatErrorResponse = (err, includeDetails = false) => {
 /**
  * Global error handler middleware
  */
-const errorHandler = (err, req, res, next) => {
+export const errorHandler = (err, req, res, next) => {
   // Default status code
   let statusCode = 500;
   
@@ -132,7 +132,7 @@ const errorHandler = (err, req, res, next) => {
 /**
  * Not found handler middleware
  */
-const notFoundHandler = (req, res, next) => {
+export const notFoundHandler = (req, res, next) => {
   const err = new NotFoundError('Resource', req.originalUrl);
   next(err);
 };
@@ -140,7 +140,7 @@ const notFoundHandler = (req, res, next) => {
 /**
  * Handle uncaught errors
  */
-const setupUncaughtErrorHandlers = () => {
+export const setupUncaughtErrorHandlers = () => {
   process.on('uncaughtException', (err) => {
     logger.error('Uncaught exception', err);
     
@@ -159,7 +159,7 @@ const setupUncaughtErrorHandlers = () => {
 };
 
 // Export all utilities
-module.exports = {
+export default {
   asyncHandler,
   errorHandler,
   notFoundHandler,

@@ -1,5 +1,5 @@
 // src/services/validation-service.js
-import { db } from '../core/db.js';
+import db from '../core/db.js';
 import { config } from '../core/config.js';
 import { createServiceLogger } from '../core/logger.js';
 import { 
@@ -10,10 +10,10 @@ import {
 } from '../core/errors.js';
 
 // Import validation services
-import { emailValidationService } from './validation/email-validation-service.js';
-import { nameValidationService } from './validation/name-validation-service.js';
-import { phoneValidationService } from './validation/phone-validation-service.js';
-import { addressValidationService } from './validation/address-validation-service.js';
+import { EmailValidationService } from './validation/email-validation-service.js';
+import { NameValidationService } from './validation/name-validation-service.js';
+import { PhoneValidationService } from './validation/phone-validation-service.js';
+import { AddressValidationService } from './validation/address-validation-service.js';
 
 // Import external services
 import { zeroBounceService } from './external/zerobounce.js';
@@ -25,11 +25,11 @@ class ValidationService {
   constructor() {
     this.logger = logger;
     
-    // Initialize services
-    this.emailValidator = emailValidationService;
-    this.nameValidator = nameValidationService;
-    this.phoneValidator = phoneValidationService;
-    this.addressValidator = addressValidationService;
+    // Initialize validation services
+    this.emailValidator = new EmailValidationService();
+    this.nameValidator = new NameValidationService();
+    this.phoneValidator = new PhoneValidationService();
+    this.addressValidator = new AddressValidationService();
     
     // External services
     this.zeroBounce = zeroBounceService;
@@ -38,6 +38,11 @@ class ValidationService {
     // Cache for batch operations
     this.batchCache = new Map();
     this.batchCacheTTL = 5 * 60 * 1000; // 5 minutes
+    
+    // Initialize on construction
+    this.initialize().catch(error => {
+      logger.error('Failed to initialize validation service', error);
+    });
   }
   
   // Initialize all services
@@ -132,7 +137,7 @@ class ValidationService {
     }
   }
   
-  // Name validation
+  // Name validation (with support for both full name and separate names)
   async validateName(name, options = {}) {
     const {
       clientId = null,
@@ -148,7 +153,8 @@ class ValidationService {
         // Validate separate names
         result = await this.nameValidator.validateSeparateNames(
           firstName || '',
-          lastName || ''
+          lastName || '',
+          { useCache, clientId }
         );
       } else if (name) {
         // Validate full name
@@ -171,6 +177,15 @@ class ValidationService {
     }
   }
   
+  // Aliases for name validation methods
+  async validateFullName(name, options = {}) {
+    return this.validateName(name, options);
+  }
+  
+  async validateSeparateNames(firstName, lastName, options = {}) {
+    return this.validateName(null, { ...options, firstName, lastName });
+  }
+  
   // Phone validation
   async validatePhone(phone, options = {}) {
     const {
@@ -186,10 +201,11 @@ class ValidationService {
     });
     
     try {
-      // Use only internal phone validation (no external carrier lookup)
+      // Use phone validation service
       const result = await this.phoneValidator.validatePhoneNumber(phone, {
         country,
-        clientId
+        clientId,
+        useCache
       });
       
       if (!result.valid) {
@@ -197,7 +213,7 @@ class ValidationService {
       }
       
       // Check cache
-      if (useCache) {
+      if (useCache && result.e164) {
         const cached = await this.phoneValidator.checkPhoneCache(result.e164);
         if (cached) {
           return { ...cached, isFromCache: true };
@@ -234,57 +250,29 @@ class ValidationService {
     });
     
     try {
-      // Parse and standardize address
-      const parsedAddress = await this.addressValidator.parseAddress(address, {
+      // Validate address using address service
+      const validationResult = await this.addressValidator.validateAddress(address, {
+        useOpenCage: !skipExternal && config.services.openCage.enabled && config.validation.address.geocode,
+        clientId,
         country,
-        clientId
+        timeout
       });
       
-      if (!parsedAddress.valid) {
-        return parsedAddress;
-      }
-      
-      // Check cache
-      if (useCache) {
-        const cacheKey = this.addressValidator.generateCacheKey(parsedAddress);
+      // Check cache if enabled
+      if (useCache && validationResult.valid) {
+        const cacheKey = this.addressValidator.generateCacheKey(validationResult);
         const cached = await this.addressValidator.checkAddressCache(cacheKey);
         if (cached) {
           return { ...cached, isFromCache: true };
         }
       }
       
-      // Enhance with geocoding if enabled
-      let result = { ...parsedAddress };
-      
-      if (!skipExternal && config.services.openCage.enabled && config.validation.address.geocode) {
-        try {
-          const geocodeResult = await ErrorRecovery.withTimeout(
-            this.openCage.geocode(parsedAddress.formatted),
-            timeout,
-            'OpenCage geocoding'
-          );
-          
-          result = this.mergeAddressResults(result, geocodeResult);
-        } catch (error) {
-          this.logger.warn('External address validation failed', error, {
-            address: parsedAddress.formatted,
-            service: 'OpenCage'
-          });
-          
-          // Continue with parsed result
-          result.geocoding = {
-            attempted: true,
-            error: error.message
-          };
-        }
-      }
-      
       // Save to cache if valid
-      if (useCache && result.valid) {
-        await this.addressValidator.saveAddressCache(address, result, clientId);
+      if (useCache && validationResult.valid) {
+        await this.addressValidator.saveAddressCache(address, validationResult, clientId);
       }
       
-      return result;
+      return validationResult;
     } catch (error) {
       this.logger.error('Address validation failed', error, { address });
       throw new ValidationError(`Address validation failed: ${error.message}`);
@@ -372,45 +360,60 @@ class ValidationService {
   
   // Helper methods for merging results
   mergeEmailResults(quickResult, externalResult) {
+    // Handle the email suggestion from ZeroBounce
+    let finalEmail = quickResult.currentEmail;
+    let wasCorrected = quickResult.wasCorrected;
+    
+    if (externalResult.didYouMean && externalResult.didYouMean !== quickResult.currentEmail) {
+      finalEmail = externalResult.didYouMean;
+      wasCorrected = true;
+    }
+    
     return {
       ...quickResult,
-      status: externalResult.status || quickResult.status,
-      subStatus: externalResult.sub_status || quickResult.subStatus,
-      freeEmail: externalResult.free_email,
+      currentEmail: finalEmail,
+      um_email: finalEmail,
+      wasCorrected,
+      status: externalResult.valid ? 'valid' : 'invalid',
+      subStatus: externalResult.subStatus || quickResult.subStatus,
+      freeEmail: externalResult.freeEmail,
       roleEmail: externalResult.role,
-      catchAll: externalResult.catch_all,
+      catchAll: externalResult.catchAll,
       disposable: externalResult.disposable,
       toxic: externalResult.toxic,
-      doNotMail: externalResult.do_not_mail,
+      doNotMail: externalResult.doNotMail,
       score: externalResult.score,
+      mxFound: externalResult.mxFound,
+      mxRecord: externalResult.mxRecord,
+      smtpProvider: externalResult.smtpProvider,
+      um_email_status: wasCorrected ? 'Changed' : 'Unchanged',
+      um_bounce_status: externalResult.valid ? 'Unlikely to bounce' : 'Likely to bounce',
       externalValidation: {
         provider: 'zerobounce',
         timestamp: new Date().toISOString(),
-        raw: externalResult
+        raw: externalResult.rawResponse
       },
       validationSteps: [
         ...quickResult.validationSteps,
         {
           step: 'external_validation',
           provider: 'zerobounce',
-          passed: externalResult.status === 'valid'
+          passed: externalResult.valid
         }
       ]
     };
   }
-
   
   mergeAddressResults(parsedResult, geocodeResult) {
     return {
       ...parsedResult,
       geocoding: {
-        latitude: geocodeResult.geometry?.lat,
-        longitude: geocodeResult.geometry?.lng,
+        latitude: geocodeResult.coordinates?.latitude,
+        longitude: geocodeResult.coordinates?.longitude,
         confidence: geocodeResult.confidence,
-        formatted: geocodeResult.formatted,
+        formatted: geocodeResult.formattedAddress,
         components: geocodeResult.components,
-        timezone: geocodeResult.annotations?.timezone,
-        what3words: geocodeResult.annotations?.what3words
+        found: geocodeResult.found
       },
       validationSteps: [
         ...parsedResult.validationSteps,
@@ -421,6 +424,33 @@ class ValidationService {
         }
       ]
     };
+  }
+  
+  // Get validation service statistics
+  async getStats() {
+    const stats = {
+      services: {
+        email: this.emailValidator.constructor.name,
+        name: this.nameValidator.constructor.name,
+        phone: this.phoneValidator.constructor.name,
+        address: this.addressValidator.constructor.name
+      },
+      external: {
+        zeroBounce: {
+          enabled: config.services.zeroBounce.enabled,
+          state: this.zeroBounce.getCircuitBreakerState()
+        },
+        openCage: {
+          enabled: config.services.openCage.enabled,
+          state: this.openCage.getCircuitBreakerState()
+        }
+      },
+      cache: {
+        batchCacheSize: this.batchCache.size
+      }
+    };
+    
+    return stats;
   }
   
   // Health check
@@ -444,9 +474,15 @@ class ValidationService {
       const nameTest = await this.validateName('John Doe');
       checks.name = nameTest ? 'healthy' : 'unhealthy';
       
+      const phoneTest = await this.validatePhone('+14155552671', { skipExternal: true });
+      checks.phone = phoneTest ? 'healthy' : 'unhealthy';
+      
+      const addressTest = await this.validateAddress('123 Main St, San Francisco, CA 94105', { skipExternal: true });
+      checks.address = addressTest ? 'healthy' : 'unhealthy';
+      
       // Check external service circuit breakers
-      checks.external.zeroBounce = this.zeroBounce.getCircuitBreakerState();
-      checks.external.openCage = this.openCage.getCircuitBreakerState();
+      checks.external.zeroBounce = this.zeroBounce.getCircuitBreakerState().state;
+      checks.external.openCage = this.openCage.getCircuitBreakerState().state;
       
     } catch (error) {
       this.logger.error('Health check failed', error);
@@ -459,10 +495,5 @@ class ValidationService {
 // Create singleton instance
 const validationService = new ValidationService();
 
-// Initialize on first import
-validationService.initialize().catch(error => {
-  logger.error('Failed to initialize validation service', error);
-});
-
 // Export both the instance and the class
-export { validationService, ValidationService };
+export { validationService as default, ValidationService };

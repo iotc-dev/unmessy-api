@@ -1,17 +1,18 @@
 // src/api/routes/hubspot-webhook.js
-const express = require('express');
-const router = express.Router();
-const { asyncHandler } = require('../middleware/error-handler');
-const { ValidationError, ExternalServiceError } = require('../../core/errors');
-const { createServiceLogger } = require('../../core/logger');
-const config = require('../../core/config');
-const db = require('../../core/db');
-const clientService = require('../../services/client-service');
-const hubspotService = require('../../services/external/hubspot');
-const queueService = require('../../services/queue-service');
+import express from 'express';
+import { asyncHandler } from '../middleware/error-handler.js';
+import { ValidationError, ExternalServiceError } from '../../core/errors.js';
+import { createServiceLogger } from '../../core/logger.js';
+import { config } from '../../core/config.js';
+import db from '../../core/db.js';
+import clientService from '../../services/client-service.js';
+import hubspotService from '../../services/external/hubspot.js';
+import queueService from '../../services/queue-service.js';
 
 // Create logger instance
 const logger = createServiceLogger('hubspot-webhook');
+
+const router = express.Router();
 
 /**
  * Verify HubSpot webhook signature
@@ -341,4 +342,4 @@ router.post('/process-queue', asyncHandler(async (req, res) => {
   }
 }));
 
-module.exports = router;
+export default router;

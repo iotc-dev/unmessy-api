@@ -1,8 +1,8 @@
 // src/api/middleware/auth.js
-const { createServiceLogger } = require('../../core/logger');
-const { AuthenticationError, InvalidApiKeyError, InactiveClientError } = require('../../core/errors');
-const config = require('../../core/config');
-const clientService = require('../../services/client-service');
+import { createServiceLogger } from '../../core/logger.js';
+import { AuthenticationError, InvalidApiKeyError, InactiveClientError } from '../../core/errors.js';
+import { config } from '../../core/config.js';
+import clientService from '../../services/client-service.js';
 
 // Create logger instance
 const logger = createServiceLogger('auth-middleware');
@@ -104,7 +104,4 @@ function authMiddleware(options = {}) {
 }
 
 // Export middleware factory and utilities
-module.exports = {
-  authMiddleware,
-  extractApiKey
-};
+export { authMiddleware, extractApiKey };

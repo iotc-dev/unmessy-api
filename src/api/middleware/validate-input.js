@@ -1,7 +1,7 @@
 // src/api/middleware/validate-input.js
-const Joi = require('joi');
-const { createServiceLogger } = require('../../core/logger');
-const { ValidationError } = require('../../core/errors');
+import Joi from 'joi';
+import { createServiceLogger } from '../../core/logger.js';
+import { ValidationError } from '../../core/errors.js';
 
 // Create logger instance
 const logger = createServiceLogger('validate-input');
@@ -76,7 +76,7 @@ function validateSchema(schema, options = {}) {
 /**
  * Predefined schemas for common validation needs
  */
-const schemas = {
+export const schemas = {
   // Email validation schema
   email: {
     body: Joi.object({
@@ -174,7 +174,7 @@ const schemas = {
 /**
  * Create validator middleware for specific validation types
  */
-const validate = {
+export const validate = {
   // Email validation middleware
   email: (customSchema) => validateSchema(customSchema || schemas.email),
   
@@ -198,7 +198,10 @@ const validate = {
 };
 
 // Export validation middleware factory and schemas
-module.exports = {
+export { validateSchema };
+
+// Export default
+export default {
   validate,
   schemas,
   validateSchema

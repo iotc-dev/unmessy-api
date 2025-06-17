@@ -1,7 +1,7 @@
 // src/api/middleware/request-logger.js
-const { v4: uuidv4 } = require('uuid');
-const { Logger, createServiceLogger, sanitizeLogData } = require('../../core/logger');
-const config = require('../../core/config');
+import { v4 as uuidv4 } from 'uuid';
+import { Logger, createServiceLogger, sanitizeLogData } from '../../core/logger.js';
+import { config } from '../../core/config.js';
 
 // Create logger instance
 const baseLogger = createServiceLogger('http');
@@ -89,7 +89,7 @@ function shouldLogBody(req) {
  * @param {number} options.bodyMaxLength - Maximum length for logged bodies
  * @returns {Function} Express middleware function
  */
-function requestLogger(options = {}) {
+export function requestLogger(options = {}) {
   const {
     logBody = true,
     logHeaders = config.isDevelopment,
@@ -180,8 +180,11 @@ function requestLogger(options = {}) {
   };
 }
 
-// Export middleware factory and utilities
-module.exports = {
+// Export utilities
+export { generateRequestId };
+
+// Export default
+export default {
   requestLogger,
   generateRequestId
 };
