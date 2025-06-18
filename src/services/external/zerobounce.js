@@ -14,14 +14,22 @@ const logger = createServiceLogger('zerobounce');
 class ZeroBounceService {
   constructor() {
     this.logger = logger;
-    // Fixed: Use correct ZeroBounce API v2 base URL
+    // Use correct ZeroBounce API v2 base URL
     this.baseUrl = config.services.zeroBounce.baseUrl || 'https://api.zerobounce.net/v2';
     this.baseUrlUS = 'https://api-us.zerobounce.net/v2';
     this.useUSEndpoint = config.services.zeroBounce.useUSEndpoint || false;
     this.apiKey = config.services.zeroBounce.apiKey;
-    this.timeout = config.services.zeroBounce.timeout;
-    this.retryTimeout = config.services.zeroBounce.retryTimeout;
-    this.maxRetries = config.services.zeroBounce.maxRetries;
+    this.timeout = config.services.zeroBounce.timeout || 6000;
+    this.retryTimeout = config.services.zeroBounce.retryTimeout || 8000;
+    this.maxRetries = config.services.zeroBounce.maxRetries || 3;
+    
+    // Log initialization (without exposing full API key)
+    this.logger.info('ZeroBounce service initialized', {
+      baseUrl: this.baseUrl,
+      apiKeyConfigured: !!this.apiKey,
+      apiKeyLength: this.apiKey ? this.apiKey.length : 0,
+      enabled: config.services.zeroBounce.enabled
+    });
     
     // Initialize circuit breaker with Opossum
     this.circuitBreaker = new CircuitBreaker(this.executeRequest.bind(this), {
@@ -90,7 +98,8 @@ class ZeroBounceService {
     }
     
     // Check if API key is configured
-    if (!this.apiKey) {
+    if (!this.apiKey || this.apiKey.trim() === '') {
+      this.logger.error('ZeroBounce API key is not configured or empty');
       throw new ZeroBounceError('ZeroBounce API key is not configured', 503);
     }
     
@@ -132,46 +141,72 @@ class ZeroBounceService {
         // Use longer timeout for retries
         const attemptTimeout = attempt === 1 ? timeout : this.retryTimeout;
         
-        const params = {
+        const params = new URLSearchParams({
           api_key: this.apiKey,
-          email,
+          email: email,
           ip_address: ipAddress || ''
-        };
+        });
         
         // Use the endpoint that worked for credits, or try both
         const baseUrl = this.useUSEndpoint ? this.baseUrlUS : this.baseUrl;
+        const url = `${baseUrl}/validate?${params.toString()}`;
         
-        // Fixed: Correct endpoint path
-        const url = new URL('/validate', baseUrl);
-        
-        // Add params to URL
-        Object.keys(params).forEach(key => {
-          url.searchParams.append(key, params[key]);
-        });
-        
-        this.logger.debug('Calling ZeroBounce validate API', {
-          endpoint: url.toString().replace(this.apiKey, 'REDACTED')
+        this.logger.debug('ZeroBounce validate URL constructed', {
+          baseUrl,
+          emailParam: email,
+          hasApiKey: !!this.apiKey
         });
         
         // Execute API call with timeout
         const response = await ErrorRecovery.withTimeout(
-          fetch(url.toString()),
+          fetch(url, {
+            method: 'GET',
+            headers: {
+              'Accept': 'application/json',
+              'User-Agent': 'Unmessy-API/2.0'
+            }
+          }),
           attemptTimeout,
           `ZeroBounce validate email: ${email}`
         );
         
+        const responseText = await response.text();
+        
         if (!response.ok) {
-          const errorText = await response.text();
+          this.logger.error('ZeroBounce API error', {
+            status: response.status,
+            statusText: response.statusText,
+            responseText: responseText.substring(0, 200) // First 200 chars
+          });
+          
+          // Check for specific error patterns
+          if (response.status === 404) {
+            throw new ZeroBounceError(
+              'ZeroBounce API endpoint not found. Please check API configuration.',
+              404
+            );
+          } else if (response.status === 401 || responseText.includes('api_key')) {
+            throw new ZeroBounceError('Invalid ZeroBounce API key', 401);
+          }
+          
           throw new ZeroBounceError(
-            `API error: ${response.status} ${errorText || response.statusText}`,
+            `API error: ${response.status} ${response.statusText}`,
             response.status
           );
         }
         
-        const data = await response.json();
+        let data;
+        try {
+          data = JSON.parse(responseText);
+        } catch (e) {
+          this.logger.error('Failed to parse ZeroBounce response', {
+            responseText: responseText.substring(0, 200)
+          });
+          throw new ZeroBounceError('Invalid JSON response from ZeroBounce API');
+        }
         
         if (!data) {
-          throw new ZeroBounceError('Invalid response from ZeroBounce API');
+          throw new ZeroBounceError('Empty response from ZeroBounce API');
         }
         
         // Format response
@@ -183,7 +218,8 @@ class ZeroBounceService {
         // Only retry on network errors or 5xx errors
         return (
           error.message?.includes('network') ||
-          error.statusCode >= 500 ||
+          error.message?.includes('fetch') ||
+          (error.statusCode && error.statusCode >= 500) ||
           error instanceof TimeoutError
         );
       });
@@ -226,6 +262,12 @@ class ZeroBounceService {
   
   // Check if we have sufficient API credits
   async checkCredits() {
+    // Check if API key is configured
+    if (!this.apiKey || this.apiKey.trim() === '') {
+      this.logger.error('Cannot check credits - API key not configured');
+      throw new ZeroBounceError('ZeroBounce API key is not configured', 503);
+    }
+    
     // Check cache first
     if (
       this.creditsCache.credits !== null &&
@@ -243,25 +285,61 @@ class ZeroBounceService {
     
     for (const baseUrl of endpoints) {
       try {
-        // Fixed: Correct endpoint path (no /api prefix)
-        const url = new URL('/getcredits', baseUrl);
-        url.searchParams.append('api_key', this.apiKey);
-        
-        this.logger.debug('Checking ZeroBounce credits', { 
-          endpoint: url.toString().replace(this.apiKey, 'REDACTED') 
+        const params = new URLSearchParams({
+          api_key: this.apiKey
         });
         
-        const response = await fetch(url.toString());
+        const url = `${baseUrl}/getcredits?${params.toString()}`;
+        
+        this.logger.debug('Checking ZeroBounce credits', { 
+          baseUrl,
+          apiKeyLength: this.apiKey.length
+        });
+        
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Unmessy-API/2.0'
+          }
+        });
+        
+        const responseText = await response.text();
         
         if (!response.ok) {
-          lastError = new ZeroBounceError(
-            `Failed to get credits: ${response.status} ${response.statusText}`,
-            response.status
-          );
+          this.logger.error('ZeroBounce credits check failed', {
+            status: response.status,
+            statusText: response.statusText,
+            responseText: responseText.substring(0, 200),
+            endpoint: baseUrl
+          });
+          
+          // Check for specific errors
+          if (response.status === 404) {
+            lastError = new ZeroBounceError(
+              'ZeroBounce API endpoint not found. Please check API configuration.',
+              404
+            );
+          } else if (response.status === 401 || responseText.includes('Invalid API key')) {
+            throw new ZeroBounceError('Invalid ZeroBounce API key', 401);
+          } else {
+            lastError = new ZeroBounceError(
+              `Failed to get credits: ${response.status} ${response.statusText}`,
+              response.status
+            );
+          }
           continue; // Try next endpoint
         }
         
-        const data = await response.json();
+        let data;
+        try {
+          data = JSON.parse(responseText);
+        } catch (e) {
+          this.logger.error('Failed to parse credits response', {
+            responseText: responseText.substring(0, 200)
+          });
+          continue;
+        }
         
         if (data && typeof data.Credits === 'number') {
           // Update cache
@@ -287,10 +365,13 @@ class ZeroBounceService {
         
         throw new ZeroBounceError('Invalid response format for credits check');
       } catch (error) {
+        if (error.statusCode === 401) {
+          throw error; // Don't retry auth errors
+        }
         lastError = error;
         this.logger.debug('Failed to get credits from endpoint', { 
           endpoint: baseUrl,
-          error: error.message 
+          error: error.message
         });
       }
     }
@@ -303,71 +384,6 @@ class ZeroBounceService {
     }
     
     throw lastError || new ZeroBounceError('Failed to check credits from all endpoints');
-  }
-  
-  // API Call Helper (not used in current implementation but kept for compatibility)
-  async makeApiCall(endpoint, params = {}, method = 'GET', timeout = this.timeout) {
-    const url = new URL(endpoint, this.baseUrl);
-    
-    // Add API key to all requests
-    params.api_key = this.apiKey;
-    
-    // Configure fetch options
-    const fetchOptions = {
-      method,
-      headers: {
-        'Accept': 'application/json'
-      }
-    };
-    
-    // Handle different HTTP methods
-    if (method === 'GET') {
-      // Add params to URL for GET requests
-      Object.keys(params).forEach(key => {
-        url.searchParams.append(key, params[key]);
-      });
-    } else {
-      // Add params to body for POST requests
-      fetchOptions.headers['Content-Type'] = 'application/json';
-      fetchOptions.body = JSON.stringify(params);
-    }
-    
-    try {
-      const response = await ErrorRecovery.withTimeout(
-        fetch(url.toString(), fetchOptions),
-        timeout,
-        `ZeroBounce ${endpoint}`
-      );
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw {
-          statusCode: response.status,
-          message: errorText || response.statusText
-        };
-      }
-      
-      const data = await response.json();
-      
-      // Log successful API call
-      this.logger.debug('ZeroBounce API call successful', {
-        endpoint,
-        status: response.status
-      });
-      
-      return data;
-    } catch (error) {
-      if (error instanceof TimeoutError) {
-        throw error;
-      }
-      
-      this.logger.error('ZeroBounce API call failed', error, {
-        endpoint,
-        statusCode: error.statusCode
-      });
-      
-      throw error;
-    }
   }
   
   // Response cache management
@@ -407,7 +423,7 @@ class ZeroBounceService {
   // Get circuit breaker state
   getCircuitBreakerState() {
     return {
-      state: this.circuitBreaker.status,
+      state: this.circuitBreaker.status.name,
       stats: {
         successes: this.circuitBreaker.stats.successes,
         failures: this.circuitBreaker.stats.failures,
@@ -424,7 +440,7 @@ class ZeroBounceService {
       
       return {
         status: 'healthy',
-        circuitBreaker: this.circuitBreaker.status,
+        circuitBreaker: this.circuitBreaker.status.name,
         credits,
         cacheSize: this.responseCache.size,
         enabled: config.services.zeroBounce.enabled
@@ -432,7 +448,7 @@ class ZeroBounceService {
     } catch (error) {
       return {
         status: 'unhealthy',
-        circuitBreaker: this.circuitBreaker.status,
+        circuitBreaker: this.circuitBreaker.status.name,
         error: error.message,
         enabled: config.services.zeroBounce.enabled
       };
