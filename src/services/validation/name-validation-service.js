@@ -25,7 +25,7 @@ class NameValidationService {
   
   async loadNormalizationData() {
     try {
-      // Load all normalization data in parallel
+      // Load all normalization data in parallel using proper Supabase methods
       const [
         honorificsData,
         suffixesData,
@@ -34,12 +34,12 @@ class NameValidationService {
         securityData,
         specialCasesData
       ] = await Promise.all([
-        db.query('SELECT honorific FROM honorifics').catch(() => ({ rows: [] })),
-        db.query('SELECT suffix, formatted FROM suffixes').catch(() => ({ rows: [] })),
-        db.query('SELECT particle FROM name_particles').catch(() => ({ rows: [] })),
-        db.query('SELECT name FROM suspicious_names').catch(() => ({ rows: [] })),
-        db.query('SELECT pattern FROM security_patterns').catch(() => ({ rows: [] })),
-        db.query('SELECT name_typo, name_correction FROM special_case_names').catch(() => ({ rows: [] }))
+        db.select('honorifics', {}, { columns: 'honorific' }).catch(() => ({ rows: [] })),
+        db.select('suffixes', {}, { columns: 'suffix, formatted' }).catch(() => ({ rows: [] })),
+        db.select('name_particles', {}, { columns: 'particle' }).catch(() => ({ rows: [] })),
+        db.select('suspicious_names', {}, { columns: 'name' }).catch(() => ({ rows: [] })),
+        db.select('security_patterns', {}, { columns: 'pattern' }).catch(() => ({ rows: [] })),
+        db.select('special_case_names', {}, { columns: 'name_typo, name_correction' }).catch(() => ({ rows: [] }))
       ]);
       
       // Populate sets and maps

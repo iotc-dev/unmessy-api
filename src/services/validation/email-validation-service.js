@@ -29,12 +29,12 @@ class EmailValidationService {
   
   async loadNormalizationData() {
     try {
-      // Load all data in parallel from database
+      // Load all data in parallel from database using proper Supabase methods
       const [validDomainsData, invalidDomainsData, domainTyposData, validTldsData] = await Promise.all([
-        db.query('SELECT domain FROM valid_domains').catch(() => ({ rows: [] })),
-        db.query('SELECT domain FROM invalid_domains').catch(() => ({ rows: [] })),
-        db.query('SELECT typo_domain, correct_domain FROM domain_typos').catch(() => ({ rows: [] })),
-        db.query('SELECT tld FROM valid_tlds').catch(() => ({ rows: [] }))
+        db.select('valid_domains', {}, { columns: 'domain' }).catch(() => ({ rows: [] })),
+        db.select('invalid_domains', {}, { columns: 'domain' }).catch(() => ({ rows: [] })),
+        db.select('domain_typos', {}, { columns: 'typo_domain, correct_domain' }).catch(() => ({ rows: [] })),
+        db.select('valid_tlds', {}, { columns: 'tld' }).catch(() => ({ rows: [] }))
       ]);
       
       // Populate sets and maps
@@ -53,6 +53,9 @@ class EmailValidationService {
         validTldsData.rows.forEach(row => this.validTlds.add(row.tld.toLowerCase()));
       }
       
+      // Initialize default data if database is empty
+      this.initializeDefaultData();
+      
       this.logger.info('Email normalization data loaded', {
         validDomains: this.validDomains.size,
         invalidDomains: this.invalidDomains.size,
@@ -61,7 +64,99 @@ class EmailValidationService {
       });
     } catch (error) {
       this.logger.error('Failed to load normalization data', error);
-      // Continue with empty collections - don't fail the service
+      // Initialize with defaults
+      this.initializeDefaultData();
+    }
+  }
+  
+  initializeDefaultData() {
+    // Default valid domains if not loaded from DB
+    if (this.validDomains.size === 0) {
+      const defaultValidDomains = [
+        'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'live.com',
+        'aol.com', 'icloud.com', 'mail.com', 'protonmail.com', 'zoho.com',
+        'yandex.com', 'gmx.com', 'fastmail.com', 'tutanota.com', 'me.com',
+        'msn.com', 'qq.com', '163.com', '126.com', 'sina.com', 'verizon.net',
+        'att.net', 'sbcglobal.net', 'cox.net', 'earthlink.net', 'charter.net',
+        'comcast.net', 'xfinity.com', 'rocketmail.com', 'ymail.com',
+        'mail.ru', 'inbox.ru', 'list.ru', 'bk.ru', 'protonmail.ch',
+        'pm.me', 'yahoo.co.uk', 'yahoo.ca', 'yahoo.com.au', 'yahoo.co.in',
+        'yahoo.co.jp', 'yahoo.de', 'yahoo.fr', 'yahoo.es', 'yahoo.it',
+        'outlook.de', 'outlook.fr', 'outlook.es', 'outlook.it', 'outlook.jp',
+        'gmail.co.uk', 'gmail.ca', 'gmail.com.au', 'gmail.co.in', 'gmail.de'
+      ];
+      defaultValidDomains.forEach(d => this.validDomains.add(d));
+    }
+    
+    // Default invalid domains
+    if (this.invalidDomains.size === 0) {
+      const defaultInvalidDomains = [
+        'example.com', 'test.com', 'email.com', 'tempmail.com', 'throwaway.email',
+        'guerrillamail.com', '10minutemail.com', 'mailinator.com', 'maildrop.cc',
+        'trashmail.com', 'fake.com', 'dummy.com', 'nowhere.com', 'noemail.com',
+        'bounce.com', 'blocked.com', 'invalid.com', 'noreply.com', 'donotreply.com'
+      ];
+      defaultInvalidDomains.forEach(d => this.invalidDomains.add(d));
+    }
+    
+    // Default domain typos
+    if (this.domainTypos.size === 0) {
+      const defaultTypos = new Map([
+        ['gmial.com', 'gmail.com'],
+        ['gmai.com', 'gmail.com'],
+        ['gmil.com', 'gmail.com'],
+        ['gmal.com', 'gmail.com'],
+        ['gmali.com', 'gmail.com'],
+        ['gamil.com', 'gmail.com'],
+        ['gmail.co', 'gmail.com'],
+        ['gmail.cm', 'gmail.com'],
+        ['gmaill.com', 'gmail.com'],
+        ['gnail.com', 'gmail.com'],
+        ['gmailcom', 'gmail.com'],
+        ['yahooo.com', 'yahoo.com'],
+        ['yaho.com', 'yahoo.com'],
+        ['yahou.com', 'yahoo.com'],
+        ['yahoo.co', 'yahoo.com'],
+        ['yahoo.cm', 'yahoo.com'],
+        ['yhaoo.com', 'yahoo.com'],
+        ['yahoocom', 'yahoo.com'],
+        ['hotmial.com', 'hotmail.com'],
+        ['hotmal.com', 'hotmail.com'],
+        ['hotmil.com', 'hotmail.com'],
+        ['hotmail.co', 'hotmail.com'],
+        ['hotmail.cm', 'hotmail.com'],
+        ['hotmailcom', 'hotmail.com'],
+        ['otmail.com', 'hotmail.com'],
+        ['outlok.com', 'outlook.com'],
+        ['outloo.com', 'outlook.com'],
+        ['outlook.co', 'outlook.com'],
+        ['outlook.cm', 'outlook.com'],
+        ['outlookcom', 'outlook.com'],
+        ['iclud.com', 'icloud.com'],
+        ['icloud.co', 'icloud.com'],
+        ['icloud.cm', 'icloud.com'],
+        ['icloudcom', 'icloud.com'],
+        ['protonmai.com', 'protonmail.com'],
+        ['protonmal.com', 'protonmail.com'],
+        ['protonmailcom', 'protonmail.com']
+      ]);
+      defaultTypos.forEach((correct, typo) => this.domainTypos.set(typo, correct));
+    }
+    
+    // Default valid TLDs
+    if (this.validTlds.size === 0) {
+      const defaultTlds = [
+        '.com', '.net', '.org', '.edu', '.gov', '.mil', '.int',
+        '.co', '.io', '.ai', '.app', '.dev', '.tech', '.me', '.info', '.biz',
+        '.us', '.uk', '.ca', '.au', '.de', '.fr', '.it', '.es', '.nl', '.be',
+        '.ch', '.at', '.se', '.no', '.dk', '.fi', '.ie', '.pt', '.gr', '.pl',
+        '.cz', '.ro', '.hu', '.ru', '.ua', '.by', '.kz', '.jp', '.cn', '.in',
+        '.kr', '.tw', '.hk', '.sg', '.my', '.th', '.vn', '.id', '.ph', '.nz',
+        '.za', '.eg', '.ma', '.ng', '.ke', '.tz', '.gh', '.et', '.ug', '.zm',
+        '.br', '.mx', '.ar', '.cl', '.co', '.pe', '.ve', '.ec', '.uy', '.py',
+        '.bo', '.do', '.gt', '.sv', '.hn', '.ni', '.cr', '.pa', '.jm', '.tt'
+      ];
+      defaultTlds.forEach(t => this.validTlds.add(t));
     }
   }
   

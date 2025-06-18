@@ -21,9 +21,11 @@ class PhoneValidationService {
   
   async loadNormalizationData() {
     try {
-      // Load country phone data from database if available
-      const countryData = await db.query(
-        'SELECT country_code, calling_code, mobile_begins_with FROM country_phone_data'
+      // Load country phone data from database using proper Supabase method
+      const countryData = await db.select(
+        'country_phone_data',
+        {},
+        { columns: 'country_code, calling_code, mobile_begins_with' }
       ).catch(() => ({ rows: [] }));
       
       if (countryData?.rows) {
