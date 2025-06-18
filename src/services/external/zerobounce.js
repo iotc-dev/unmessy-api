@@ -1,32 +1,24 @@
 // src/services/external/zerobounce.js
 import CircuitBreaker from 'opossum';
+import { config } from '../../core/config.js';
 import { createServiceLogger } from '../../core/logger.js';
 import { 
-  ZeroBounceError, 
-  TimeoutError, 
-  ValidationError, 
-  ErrorRecovery 
+  ExternalServiceError,
+  ZeroBounceError,
+  ErrorRecovery,
+  TimeoutError
 } from '../../core/errors.js';
-import { config } from '../../core/config.js';
 
-// Create logger instance
-const logger = createServiceLogger('zerobounce-service');
+const logger = createServiceLogger('zerobounce');
 
-// Constants
-const API_BASE_URL = 'https://api.zerobounce.net/v2';
-
-/**
- * ZeroBounce email validation service
- * Provides email deliverability checking via ZeroBounce API
- */
 class ZeroBounceService {
   constructor() {
     this.logger = logger;
-    this.baseUrl = API_BASE_URL;
+    this.baseUrl = 'https://api.zerobounce.net/v2'; // Add the base URL
     this.apiKey = config.services.zeroBounce.apiKey;
-    this.timeout = config.services.zeroBounce.timeout || 6000;
-    this.retryTimeout = config.services.zeroBounce.retryTimeout || 8000;
-    this.maxRetries = config.services.zeroBounce.maxRetries || 3;
+    this.timeout = config.services.zeroBounce.timeout;
+    this.retryTimeout = config.services.zeroBounce.retryTimeout;
+    this.maxRetries = config.services.zeroBounce.maxRetries;
     
     // Initialize circuit breaker with Opossum
     this.circuitBreaker = new CircuitBreaker(this.executeRequest.bind(this), {
@@ -42,7 +34,7 @@ class ZeroBounceService {
     // Add event listeners
     this.setupCircuitBreakerEvents();
     
-    // Credit balance cache
+    // Cache for API credits (avoid repeated calls)
     this.creditsCache = {
       credits: null,
       timestamp: null,
@@ -96,91 +88,94 @@ class ZeroBounceService {
     
     // Check if API key is configured
     if (!this.apiKey) {
-      throw new ZeroBounceError('No API key configured', 401);
+      throw new ZeroBounceError('ZeroBounce API key is not configured', 503);
     }
     
     // Check response cache first
     const cached = this.getFromResponseCache(email);
     if (cached) {
-      this.logger.debug('Returning cached ZeroBounce response', { email });
+      this.logger.debug('ZeroBounce result from cache', { email });
       return cached;
     }
     
     try {
-      // Execute with circuit breaker
-      return await this.circuitBreaker.fire(email, ipAddress, timeout);
+      // Execute through circuit breaker
+      const result = await this.circuitBreaker.fire(email, ipAddress, timeout);
+      
+      // Cache the result
+      this.addToResponseCache(email, result);
+      
+      return result;
     } catch (error) {
-      // If circuit is open, return a default response
-      if (this.circuitBreaker.opened) {
-        throw new ZeroBounceError('Service temporarily unavailable', 503);
+      if (error.name === 'CircuitBreakerOpen') {
+        throw new ZeroBounceError('ZeroBounce service is temporarily unavailable', 503);
       }
+      
       throw error;
     }
   }
   
-  // Execute the actual API request
+  // Actual API request execution (wrapped by circuit breaker)
   async executeRequest(email, ipAddress, timeout) {
     try {
-      return await ErrorRecovery.withRetry(
-        async (attempt) => {
-          this.logger.debug('Attempting ZeroBounce validation', {
-            email,
-            attempt,
-            timeout: attempt === 1 ? timeout : this.retryTimeout
-          });
-          
-          // Use longer timeout for retries
-          const attemptTimeout = attempt === 1 ? timeout : this.retryTimeout;
-          
-          const params = {
-            api_key: this.apiKey,
-            email,
-            ip_address: ipAddress || ''
-          };
-          
-          // Fix: Use '/validate' instead of '/api/validate'
-          const url = new URL('/validate', this.baseUrl);
-          
-          // Add params to URL
-          Object.keys(params).forEach(key => {
-            url.searchParams.append(key, params[key]);
-          });
-          
-          // Execute API call with timeout
-          const response = await ErrorRecovery.withTimeout(
-            fetch(url.toString()),
-            attemptTimeout,
-            `ZeroBounce validate email: ${email}`
-          );
-          
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new ZeroBounceError(
-              `API error: ${response.status} ${errorText || response.statusText}`,
-              response.status
-            );
-          }
-          
-          const data = await response.json();
-          
-          if (!data) {
-            throw new ZeroBounceError('Invalid response from ZeroBounce API');
-          }
-          
-          // Format response
-          return this.formatValidationResponse(data, email);
-        },
-        this.maxRetries,
-        500, // Initial delay in ms
-        (error) => {
-          // Only retry on network errors or 5xx errors
-          return (
-            error.message?.includes('network') ||
-            error.statusCode >= 500 ||
-            error instanceof TimeoutError
+      // Call ZeroBounce API with retry logic
+      return await ErrorRecovery.withRetry(async (attempt) => {
+        this.logger.debug('Calling ZeroBounce API', {
+          email,
+          attempt,
+          timeout: attempt === 1 ? timeout : this.retryTimeout
+        });
+        
+        // Use longer timeout for retries
+        const attemptTimeout = attempt === 1 ? timeout : this.retryTimeout;
+        
+        const params = {
+          api_key: this.apiKey,
+          email,
+          ip_address: ipAddress || ''
+        };
+        
+        const url = new URL('/validate', this.baseUrl);
+        
+        // Add params to URL
+        Object.keys(params).forEach(key => {
+          url.searchParams.append(key, params[key]);
+        });
+        
+        // Execute API call with timeout
+        const response = await ErrorRecovery.withTimeout(
+          fetch(url.toString()),
+          attemptTimeout,
+          `ZeroBounce validate email: ${email}`
+        );
+        
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new ZeroBounceError(
+            `API error: ${response.status} ${errorText || response.statusText}`,
+            response.status
           );
         }
-      );
+        
+        const data = await response.json();
+        
+        if (!data) {
+          throw new ZeroBounceError('Invalid response from ZeroBounce API');
+        }
+        
+        // Format response
+        return this.formatValidationResponse(data, email);
+      },
+      this.maxRetries,
+      500, // Initial delay in ms
+      (error) => {
+        // Only retry on network errors or 5xx errors
+        return (
+          error.message?.includes('network') ||
+          error.statusCode >= 500 ||
+          error instanceof TimeoutError
+        );
+      });
     } catch (error) {
       this.logger.error('ZeroBounce validation failed', error, { email });
       throw error;
@@ -229,7 +224,6 @@ class ZeroBounceService {
     }
     
     try {
-      // Fix: Use '/getcredits' instead of '/api/getcredits'
       const url = new URL('/getcredits', this.baseUrl);
       url.searchParams.append('api_key', this.apiKey);
       
@@ -332,31 +326,36 @@ class ZeroBounceService {
   
   // Response cache management
   getFromResponseCache(email) {
-    const cached = this.responseCache.get(email);
-    if (cached && Date.now() - cached.timestamp < this.responseCacheTTL) {
-      return cached.data;
+    const cached = this.responseCache.get(email.toLowerCase());
+    if (!cached) return null;
+    
+    // Check if expired
+    if (Date.now() - cached.timestamp > this.responseCacheTTL) {
+      this.responseCache.delete(email.toLowerCase());
+      return null;
     }
     
-    // Remove expired entry
-    if (cached) {
-      this.responseCache.delete(email);
-    }
-    
-    return null;
+    return cached.data;
   }
   
   addToResponseCache(email, data) {
-    // Limit cache size
+    // Maintain cache size limit
     if (this.responseCache.size >= this.maxCacheSize) {
       // Remove oldest entry
       const firstKey = this.responseCache.keys().next().value;
       this.responseCache.delete(firstKey);
     }
     
-    this.responseCache.set(email, {
+    this.responseCache.set(email.toLowerCase(), {
       data,
       timestamp: Date.now()
     });
+  }
+  
+  // Clear response cache
+  clearResponseCache() {
+    this.responseCache.clear();
+    this.logger.info('ZeroBounce response cache cleared');
   }
   
   // Get circuit breaker state
@@ -372,23 +371,24 @@ class ZeroBounceService {
     };
   }
   
-  // Health check - simple version that doesn't make API calls
+  // Health check
   async healthCheck() {
     try {
-      // Just check if API key is configured and circuit is not open
-      const hasApiKey = !!this.apiKey;
-      const circuitClosed = !this.circuitBreaker.opened;
+      const credits = await this.checkCredits();
       
       return {
-        status: hasApiKey && circuitClosed ? 'healthy' : 'unhealthy',
-        hasApiKey,
+        status: 'healthy',
         circuitBreaker: this.circuitBreaker.status,
-        cachedCredits: this.creditsCache.credits
+        credits,
+        cacheSize: this.responseCache.size,
+        enabled: config.services.zeroBounce.enabled
       };
     } catch (error) {
       return {
         status: 'unhealthy',
-        error: error.message
+        circuitBreaker: this.circuitBreaker.status,
+        error: error.message,
+        enabled: config.services.zeroBounce.enabled
       };
     }
   }
@@ -399,4 +399,3 @@ const zeroBounceService = new ZeroBounceService();
 
 // Export both the instance and the class
 export { zeroBounceService, ZeroBounceService };
-export default zeroBounceService;

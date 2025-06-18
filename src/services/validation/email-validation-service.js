@@ -40,7 +40,7 @@ class EmailValidationService {
   
   async loadNormalizationData() {
     try {
-      // Load all data in parallel from database using proper Supabase methods
+  // Load all data in parallel from database using proper Supabase methods
       const [
         validDomainsData, 
         invalidDomainsData, 
@@ -767,49 +767,46 @@ class EmailValidationService {
   async checkEmailCache(email) {
     try {
       // Check if this email has been previously validated as "Unlikely to bounce"
-      const { data, error } = await db.getConnection()
-        .from('email_validations')
-        .select('*')
-        .eq('email', email.toLowerCase())
-        .order('date_last_um_check_epoch', { ascending: false })
-        .limit(1)
-        .single();
+      const result = await db.select('email_validations', 
+        { email: email.toLowerCase() }, 
+        { 
+          limit: 1,
+          order: { column: 'date_last_um_check_epoch', ascending: false }
+        }
+      );
       
-      if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
-        this.logger.error('Failed to check email in database', error, { email });
+      if (!result || !result.rows || result.rows.length === 0) {
         return null;
       }
       
-      if (data) {
-        // This email was previously validated as "Unlikely to bounce"
-        // Trust it forever - no revalidation needed
-        const validationAge = Date.now() - (data.date_last_um_check_epoch || 0);
-        
-        this.logger.debug('Email found in valid emails database', { 
-          email,
-          daysSinceValidation: Math.floor(validationAge / (24 * 60 * 60 * 1000))
-        });
-        
-        // Return the valid email data
-        return {
-          originalEmail: email,
-          currentEmail: data.um_email || email,
-          formatValid: true,
-          wasCorrected: data.um_email !== email,
-          status: 'valid', // We only store valid emails
-          recheckNeeded: false,
-          um_email: data.um_email,
-          um_email_status: data.um_email_status,
-          um_bounce_status: 'Unlikely to bounce', // Always this value in the database
-          date_last_um_check: data.date_last_um_check,
-          date_last_um_check_epoch: data.date_last_um_check_epoch,
-          um_check_id: data.um_check_id,
-          isFromDatabase: true,
-          daysSinceValidation: Math.floor(validationAge / (24 * 60 * 60 * 1000))
-        };
-      }
+      const data = result.rows[0];
       
-      return null;
+      // This email was previously validated as "Unlikely to bounce"
+      // Trust it forever - no revalidation needed
+      const validationAge = Date.now() - (data.date_last_um_check_epoch || 0);
+      
+      this.logger.debug('Email found in valid emails database', { 
+        email,
+        daysSinceValidation: Math.floor(validationAge / (24 * 60 * 60 * 1000))
+      });
+      
+      // Return the valid email data
+      return {
+        originalEmail: email,
+        currentEmail: data.um_email || email,
+        formatValid: true,
+        wasCorrected: data.um_email !== email,
+        status: 'valid', // We only store valid emails
+        recheckNeeded: false,
+        um_email: data.um_email,
+        um_email_status: data.um_email_status,
+        um_bounce_status: 'Unlikely to bounce', // Always this value in the database
+        date_last_um_check: data.date_last_um_check,
+        date_last_um_check_epoch: data.date_last_um_check_epoch,
+        um_check_id: data.um_check_id,
+        isFromDatabase: true,
+        daysSinceValidation: Math.floor(validationAge / (24 * 60 * 60 * 1000))
+      };
     } catch (error) {
       this.logger.error('Failed to check email in database', error, { email });
       return null;
@@ -840,21 +837,25 @@ class EmailValidationService {
         updated_at: new Date().toISOString()
       };
       
-      // Use upsert to update existing records or insert new ones
-      const { error } = await db.getConnection()
-        .from('email_validations')
-        .upsert(cacheData, { 
-          onConflict: 'email',
-          returning: 'minimal'
-        });
+      // First try to update existing record
+      const updateResult = await db.update(
+        'email_validations',
+        cacheData,
+        { email: email.toLowerCase() },
+        { returning: false }
+      );
       
-      if (error) {
-        this.logger.error('Failed to save valid email to database', error, { email });
-      } else {
-        this.logger.debug('Valid email saved to database', { email, clientId });
+      // If no record was updated, insert new one
+      if (!updateResult || updateResult.rows.length === 0) {
+        await db.insert('email_validations', cacheData, { returning: false });
       }
+      
+      this.logger.debug('Valid email saved to database', { email, clientId });
     } catch (error) {
-      this.logger.error('Failed to save valid email to database', error, { email });
+      // Handle duplicate key errors gracefully
+      if (error.code !== '23505') { // PostgreSQL unique violation
+        this.logger.error('Failed to save valid email to database', error, { email });
+      }
     }
   }
 }
