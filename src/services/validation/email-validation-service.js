@@ -38,6 +38,28 @@ class EmailValidationService {
     this.loadNormalizationData();
   }
   
+  // Get client account type
+  async getClientAccountType(clientId) {
+    try {
+      const result = await db.select('clients', 
+        { client_id: clientId }, 
+        { 
+          columns: 'um_account_type',
+          limit: 1
+        }
+      );
+      
+      if (result && result.rows && result.rows.length > 0) {
+        return result.rows[0];
+      }
+      
+      return null;
+    } catch (error) {
+      this.logger.error('Failed to get client account type', error, { clientId });
+      return null;
+    }
+  }
+  
   async loadNormalizationData() {
     try {
       // Load all data in parallel from database using proper Supabase methods
@@ -410,21 +432,34 @@ class EmailValidationService {
     }
   }
   
-  // Main validation method that orchestrates the full validation flow
+  // Main validation method - UPDATED with new flow
   async validateEmail(email, options = {}) {
     const { clientId = null, useCache = true, useZeroBounce = true } = options;
     
     try {
-      // Check if email exists in database (previously validated as "Unlikely to bounce")
+      // Get client account type
+      let accountType = 'basic'; // default
+      if (clientId) {
+        try {
+          const client = await this.getClientAccountType(clientId);
+          if (client) {
+            accountType = client.um_account_type || 'basic';
+          }
+        } catch (error) {
+          this.logger.warn('Failed to get client account type', { clientId, error: error.message });
+        }
+      }
+      // Step 1: Check database for valid emails (previously validated as "Unlikely to bounce")
       if (useCache) {
         const existingValidEmail = await this.checkEmailCache(email);
         if (existingValidEmail) {
           this.logger.debug('Email found in valid emails database', { email });
+          // Return immediately - trust forever
           return existingValidEmail;
         }
       }
       
-      // Step 1: Use validator.js for initial validation
+      // Step 2: Format check using validator.js
       const isValidFormat = validator.isEmail(email, {
         allow_display_name: false,
         require_display_name: false,
@@ -437,19 +472,19 @@ class EmailValidationService {
       });
       
       if (!isValidFormat) {
-        // If validator.js says it's invalid, check with ZeroBounce for "did you mean"
-        if (useZeroBounce && this.zeroBounce) {
+        // If validator.js says it's invalid, try ZeroBounce for "did you mean"
+        if (useZeroBounce && this.zeroBounce && config.services.zeroBounce.enabled) {
           try {
             const zbResult = await this.zeroBounce.validateEmail(email);
             
             // If ZeroBounce has a "did you mean" suggestion, use it
-            if (zbResult.didYouMean) {
+            if (zbResult.didYouMean && zbResult.didYouMean !== email) {
               this.logger.debug('ZeroBounce suggested correction', { 
                 original: email, 
                 suggestion: zbResult.didYouMean 
               });
               
-              // Validate the suggested email
+              // Validate the suggested email recursively
               return await this.validateEmail(zbResult.didYouMean, options);
             }
           } catch (error) {
@@ -465,16 +500,16 @@ class EmailValidationService {
           wasCorrected: false,
           recheckNeeded: false,
           um_bounce_status: 'Likely to bounce'
-        }, clientId);
+        }, clientId, accountType);
       }
       
-      // Step 2: Perform typo corrections
+      // Step 3: Perform typo corrections
       const { corrected, email: correctedEmail, suggestions } = await this.correctEmailTypos(email);
       
       // Extract domain
       const domain = correctedEmail.split('@')[1];
       
-      // Step 3: Check invalid domains (still check this before ZeroBounce to save API calls)
+      // Step 4: Check invalid domains (return as "Likely to bounce")
       if (this.invalidDomains.has(domain)) {
         this.logger.debug('Domain is in invalid list', { domain });
         return this.buildValidationResult(email, {
@@ -488,18 +523,41 @@ class EmailValidationService {
           recheckNeeded: false,
           um_bounce_status: 'Likely to bounce',
           suggestions
-        }, clientId);
+        }, clientId, accountType);
       }
       
-      // Step 4: Call ZeroBounce for ALL emails (even valid domains) after typo correction
+      // Step 5: MX record lookup (without using ZeroBounce)
+      const mxCheck = await this.checkMxRecords(domain);
+      
+      if (!mxCheck.hasMxRecords && !mxCheck.skipped) {
+        return this.buildValidationResult(email, {
+          currentEmail: correctedEmail,
+          formatValid: true,
+          wasCorrected: corrected,
+          domainValid: false,
+          mxRecordsFound: false,
+          status: 'invalid',
+          subStatus: 'no_mx_records',
+          recheckNeeded: false,
+          um_bounce_status: 'Likely to bounce',
+          suggestions,
+          mxInfo: {
+            checked: true,
+            hasMxRecords: false,
+            records: []
+          }
+        }, clientId, accountType);
+      }
+      
+      // Step 6: ZeroBounce validation (including "did you mean" handling)
       if (useZeroBounce && this.zeroBounce && config.services.zeroBounce.enabled) {
         try {
-          // NO CREDIT CHECK - Just validate directly
+          // Direct validation without credit check
           let zbResult = await this.zeroBounce.validateEmail(correctedEmail);
           let finalEmail = correctedEmail;
           let totalCorrections = corrected;
           
-          // If ZeroBounce suggests a different email, validate the suggestion
+          // Handle "did you mean" suggestions
           if (zbResult.didYouMean && zbResult.didYouMean !== correctedEmail) {
             this.logger.debug('ZeroBounce suggested correction, validating suggestion', {
               original: correctedEmail,
@@ -513,12 +571,12 @@ class EmailValidationService {
               email: zbResult.didYouMean
             });
             
-            // Call ZeroBounce again with the suggested email
+            // Validate the suggested email
             const suggestionResult = await this.zeroBounce.validateEmail(zbResult.didYouMean);
             
             // Use the suggestion result as our final result
             zbResult = suggestionResult;
-            finalEmail = zbResult.didYouMean || zbResult.email || zbResult.didYouMean;
+            finalEmail = zbResult.email || zbResult.didYouMean;
             totalCorrections = true;
           }
           
@@ -528,12 +586,13 @@ class EmailValidationService {
             finalEmail,
             totalCorrections,
             zbResult,
-            null, // MX check not needed when using ZeroBounce
+            mxCheck,
             suggestions,
-            clientId
+            clientId,
+            accountType
           );
           
-          // Save to database only if the email is valid (Unlikely to bounce)
+          // Step 7: Save to database only if "Unlikely to bounce"
           if (useCache && finalResult.status === 'valid' && finalResult.um_bounce_status === 'Unlikely to bounce') {
             await this.saveEmailCache(email, finalResult, clientId);
           }
@@ -546,19 +605,19 @@ class EmailValidationService {
               (error.message && error.message.toLowerCase().includes('insufficient') && error.message.toLowerCase().includes('credits'))) {
             this.logger.warn('ZeroBounce insufficient credits, falling back to basic validation', { email: correctedEmail });
             // Fall back to basic validation
-            return this.performBasicValidation(email, correctedEmail, corrected, suggestions, clientId);
+            return this.performBasicValidation(email, correctedEmail, corrected, suggestions, clientId, mxCheck, accountType);
           }
           
           // For other errors, log and fall back
           this.logger.error('ZeroBounce validation failed', error, { email: correctedEmail });
           
-          // If ZeroBounce fails for any reason, fall back to basic validation
-          return this.performBasicValidation(email, correctedEmail, corrected, suggestions, clientId);
+          // Fall back to basic validation
+          return this.performBasicValidation(email, correctedEmail, corrected, suggestions, clientId, mxCheck, accountType);
         }
       }
       
       // If ZeroBounce is disabled, perform basic validation
-      return this.performBasicValidation(email, correctedEmail, corrected, suggestions, clientId);
+      return this.performBasicValidation(email, correctedEmail, corrected, suggestions, clientId, mxCheck, accountType);
     } catch (error) {
       this.logger.error('Email validation failed', error, { email });
       throw new ValidationError(`Email validation failed: ${error.message}`);
@@ -566,35 +625,18 @@ class EmailValidationService {
   }
   
   // Perform basic validation when ZeroBounce is not available
-  async performBasicValidation(originalEmail, correctedEmail, wasCorrected, suggestions, clientId) {
+  async performBasicValidation(originalEmail, correctedEmail, wasCorrected, suggestions, clientId, mxCheck, accountType = 'basic') {
     const domain = correctedEmail.split('@')[1];
     
-    // Check MX records
-    const mxCheck = await this.checkMxRecords(domain);
-    
-    if (!mxCheck.hasMxRecords && !mxCheck.skipped) {
-      return this.buildValidationResult(originalEmail, {
-        currentEmail: correctedEmail,
-        formatValid: true,
-        wasCorrected,
-        domainValid: false,
-        mxRecordsFound: false,
-        status: 'invalid',
-        subStatus: 'no_mx_records',
-        recheckNeeded: false,
-        um_bounce_status: 'Likely to bounce',
-        suggestions,
-        mxInfo: {
-          checked: true,
-          hasMxRecords: false,
-          records: []
-        }
-      }, clientId);
+    // If MX check wasn't already done, do it now
+    if (!mxCheck) {
+      mxCheck = await this.checkMxRecords(domain);
     }
     
     // Check if domain is in valid domains list
     const domainValid = this.validDomains.has(domain);
-    const status = domainValid ? 'valid' : 'unknown';
+    const status = domainValid && mxCheck.hasMxRecords ? 'valid' : 'unknown';
+    const umBounceStatus = domainValid && mxCheck.hasMxRecords ? 'Unlikely to bounce' : 'Unknown';
     
     return this.buildValidationResult(originalEmail, {
       currentEmail: correctedEmail,
@@ -604,7 +646,7 @@ class EmailValidationService {
       mxRecordsFound: mxCheck.hasMxRecords,
       status,
       recheckNeeded: !domainValid,
-      um_bounce_status: domainValid && mxCheck.hasMxRecords ? 'Unlikely to bounce' : 'Unknown',
+      um_bounce_status: umBounceStatus,
       suggestions,
       mxInfo: {
         checked: !mxCheck.skipped,
@@ -612,11 +654,11 @@ class EmailValidationService {
         primaryMx: mxCheck.primaryMx,
         recordCount: mxCheck.mxRecords?.length || 0
       }
-    }, clientId);
+    }, clientId, accountType);
   }
   
   // Build result with ZeroBounce data
-  buildZeroBounceResult(originalEmail, finalEmail, wasCorrected, zbResult, mxCheck, suggestions, clientId) {
+  buildZeroBounceResult(originalEmail, finalEmail, wasCorrected, zbResult, mxCheck, suggestions, clientId, accountType = 'basic') {
     const now = new Date();
     const epochMs = now.getTime();
     const umCheckId = this.generateUmCheckId(clientId);
@@ -641,9 +683,16 @@ class EmailValidationService {
     
     // Build validation steps
     const validationSteps = [
+      { step: 'database_check', passed: false, note: 'Email not found in database' },
       { step: 'format_check', passed: true, validator: 'validator.js' },
       { step: 'typo_correction', applied: wasCorrected, corrected: finalEmail },
-      { step: 'domain_check', passed: true },
+      { step: 'invalid_domain_check', passed: true },
+      { 
+        step: 'mx_record_check', 
+        performed: mxCheck && !mxCheck.skipped, 
+        hasMxRecords: mxCheck?.hasMxRecords,
+        primaryMx: mxCheck?.primaryMx
+      },
       { 
         step: 'zerobounce_validation', 
         performed: true, 
@@ -655,7 +704,7 @@ class EmailValidationService {
       }
     ];
     
-    return {
+    const result = {
       originalEmail,
       currentEmail: finalEmail,
       formatValid: true,
@@ -668,13 +717,20 @@ class EmailValidationService {
       // Unmessy fields
       um_email: finalEmail,
       um_email_status: wasCorrected ? 'Changed' : 'Unchanged',
-      um_bounce_status: umBounceStatus,
       date_last_um_check: now.toISOString(),
       date_last_um_check_epoch: epochMs,
       um_check_id: umCheckId,
       
       // Suggestions
       suggestions,
+      
+      // MX info
+      mxInfo: mxCheck ? {
+        checked: !mxCheck.skipped,
+        hasMxRecords: mxCheck.hasMxRecords,
+        primaryMx: mxCheck.primaryMx,
+        recordCount: mxCheck.mxRecords?.length || 0
+      } : null,
       
       // ZeroBounce data
       zeroBounce: {
@@ -701,10 +757,17 @@ class EmailValidationService {
       // Validation steps
       validationSteps
     };
+    
+    // Add um_bounce_status only if account type is not 'basic'
+    if (accountType !== 'basic') {
+      result.um_bounce_status = umBounceStatus;
+    }
+    
+    return result;
   }
   
   // Build validation result
-  buildValidationResult(originalEmail, validationData, clientId) {
+  buildValidationResult(originalEmail, validationData, clientId, accountType = 'basic') {
     const now = new Date();
     const epochMs = now.getTime();
     const umCheckId = this.generateUmCheckId(clientId);
@@ -717,12 +780,17 @@ class EmailValidationService {
     
     // Build validation steps
     const validationSteps = [
+      { step: 'database_check', passed: false, note: 'Email not found in database' },
       { step: 'format_check', passed: validationData.formatValid !== false },
       { step: 'typo_correction', applied: validationData.wasCorrected, corrected: validationData.currentEmail }
     ];
     
     if (validationData.formatValid) {
-      validationSteps.push({ step: 'domain_check', passed: validationData.domainValid });
+      validationSteps.push({ 
+        step: 'invalid_domain_check', 
+        passed: !validationData.isInvalidDomain,
+        isInvalidDomain: validationData.isInvalidDomain 
+      });
     }
     
     // Add MX check step if it was performed
@@ -735,7 +803,7 @@ class EmailValidationService {
       });
     }
     
-    return {
+    const result = {
       originalEmail,
       currentEmail: validationData.currentEmail || originalEmail,
       formatValid: validationData.formatValid !== false,
@@ -749,7 +817,6 @@ class EmailValidationService {
       // Unmessy fields
       um_email: validationData.currentEmail || originalEmail,
       um_email_status: umEmailStatus,
-      um_bounce_status: umBounceStatus,
       date_last_um_check: now.toISOString(),
       date_last_um_check_epoch: epochMs,
       um_check_id: umCheckId,
@@ -763,6 +830,13 @@ class EmailValidationService {
       // Validation steps
       validationSteps: validationData.validationSteps || validationSteps
     };
+    
+    // Add um_bounce_status only if account type is not 'basic'
+    if (accountType !== 'basic') {
+      result.um_bounce_status = umBounceStatus;
+    }
+    
+    return result;
   }
   
   // Check if email exists in valid emails database
@@ -807,7 +881,11 @@ class EmailValidationService {
         date_last_um_check_epoch: data.date_last_um_check_epoch,
         um_check_id: data.um_check_id,
         isFromDatabase: true,
-        daysSinceValidation: Math.floor(validationAge / (24 * 60 * 60 * 1000))
+        daysSinceValidation: Math.floor(validationAge / (24 * 60 * 60 * 1000)),
+        // Add validation steps to show it came from database
+        validationSteps: [
+          { step: 'database_check', passed: true, note: 'Email found in database as valid' }
+        ]
       };
     } catch (error) {
       this.logger.error('Failed to check email in database', error, { email });
