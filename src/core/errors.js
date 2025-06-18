@@ -1,243 +1,208 @@
 // src/core/errors.js
-import CircuitBreaker from 'opossum';
+import { createServiceLogger } from './logger.js';
 
-// Base custom error class
-export class AppError extends Error {
+const logger = createServiceLogger('errors');
+
+/**
+ * Base Error class for all custom errors
+ */
+export class BaseError extends Error {
   constructor(message, statusCode = 500, isOperational = true) {
     super(message);
+    this.name = this.constructor.name;
     this.statusCode = statusCode;
-    this.status = `${statusCode}`.startsWith('4') ? 'fail' : 'error';
     this.isOperational = isOperational;
-    this.timestamp = new Date().toISOString();
-    
     Error.captureStackTrace(this, this.constructor);
   }
-  
-  toJSON() {
-    return {
-      name: this.name,
-      message: this.message,
-      statusCode: this.statusCode,
-      status: this.status,
-      isOperational: this.isOperational,
-      timestamp: this.timestamp,
-      stack: this.stack
-    };
+}
+
+/**
+ * Validation Error - for input validation failures
+ */
+export class ValidationError extends BaseError {
+  constructor(message, statusCode = 400) {
+    super(message, statusCode);
+    this.type = 'validation';
   }
 }
 
-// Authentication errors
-export class AuthenticationError extends AppError {
-  constructor(message = 'Authentication failed') {
-    super(message, 401, true);
-    this.name = 'AuthenticationError';
+/**
+ * Authentication Error - for auth failures
+ */
+export class AuthenticationError extends BaseError {
+  constructor(message = 'Authentication failed', statusCode = 401) {
+    super(message, statusCode);
+    this.type = 'authentication';
   }
 }
 
-export class AuthorizationError extends AppError {
-  constructor(message = 'Insufficient permissions') {
-    super(message, 403, true);
-    this.name = 'AuthorizationError';
+/**
+ * Authorization Error - for permission failures
+ */
+export class AuthorizationError extends BaseError {
+  constructor(message = 'Access denied', statusCode = 403) {
+    super(message, statusCode);
+    this.type = 'authorization';
   }
 }
 
-export class InvalidApiKeyError extends AuthenticationError {
-  constructor(reason = 'Invalid API key') {
-    super(reason);
-    this.name = 'InvalidApiKeyError';
-    this.reason = reason;
+/**
+ * Not Found Error - for missing resources
+ */
+export class NotFoundError extends BaseError {
+  constructor(resource, identifier) {
+    super(`${resource} not found${identifier ? `: ${identifier}` : ''}`, 404);
+    this.type = 'not_found';
+    this.resource = resource;
+    this.identifier = identifier;
   }
 }
 
-export class InactiveClientError extends AuthorizationError {
-  constructor(clientId) {
-    super('Client account is inactive');
-    this.name = 'InactiveClientError';
-    this.clientId = clientId;
+/**
+ * Rate Limit Error - for exceeding rate limits
+ */
+export class RateLimitError extends BaseError {
+  constructor(message = 'Rate limit exceeded', retryAfter = null) {
+    super(message, 429);
+    this.type = 'rate_limit';
+    this.retryAfter = retryAfter;
   }
 }
 
-// Validation errors
-export class ValidationError extends AppError {
-  constructor(message, validationErrors = []) {
-    super(message, 400, true);
-    this.name = 'ValidationError';
-    this.validationErrors = validationErrors;
+/**
+ * Database Error - for database operation failures
+ */
+export class DatabaseError extends BaseError {
+  constructor(message, originalError = null) {
+    super(message, 500);
+    this.type = 'database';
+    this.originalError = originalError;
   }
 }
 
-export class InvalidInputError extends ValidationError {
-  constructor(field, value, message) {
-    super(message || `Invalid value for field: ${field}`);
-    this.name = 'InvalidInputError';
-    this.field = field;
-    this.value = value;
-  }
-}
-
-// Rate limiting errors
-export class RateLimitError extends AppError {
-  constructor(validationType, limit, used, remaining) {
-    super('Rate limit exceeded', 429, true);
-    this.name = 'RateLimitError';
-    this.validationType = validationType;
-    this.limit = limit;
-    this.used = used;
-    this.remaining = remaining;
-  }
-}
-
-// External service errors
-export class ExternalServiceError extends AppError {
-  constructor(service, message, statusCode = 502) {
-    super(`${service} service error: ${message}`, statusCode, true);
-    this.name = 'ExternalServiceError';
+/**
+ * External Service Error - for third-party API failures
+ */
+export class ExternalServiceError extends BaseError {
+  constructor(service, message, statusCode = 503) {
+    super(`${service} service error: ${message}`, statusCode);
+    this.type = 'external_service';
     this.service = service;
   }
 }
 
-export class ZeroBounceError extends ExternalServiceError {
-  constructor(message, statusCode = 502) {
-    super('ZeroBounce', message, statusCode);
-    this.name = 'ZeroBounceError';
+/**
+ * Configuration Error - for missing or invalid configuration
+ */
+export class ConfigurationError extends BaseError {
+  constructor(message) {
+    super(`Configuration error: ${message}`, 500);
+    this.type = 'configuration';
+    this.isOperational = false; // Config errors are not operational
   }
 }
 
-export class HubSpotError extends ExternalServiceError {
-  constructor(message, statusCode = 502) {
-    super('HubSpot', message, statusCode);
-    this.name = 'HubSpotError';
-  }
-}
-
-export class OpenCageError extends ExternalServiceError {
-  constructor(message, statusCode = 502) {
-    super('OpenCage', message, statusCode);
-    this.name = 'OpenCageError';
-  }
-}
-
-export class TwilioError extends ExternalServiceError {
-  constructor(message, statusCode = 502) {
-    super('Twilio', message, statusCode);
-    this.name = 'TwilioError';
-  }
-}
-
-// Database errors
-export class DatabaseError extends AppError {
-  constructor(message, operation = null, originalError = null) {
-    super(`Database error: ${message}`, 500, false);
-    this.name = 'DatabaseError';
-    this.operation = operation;
-    this.originalError = originalError;
-  }
-}
-
-export class DatabaseConnectionError extends DatabaseError {
-  constructor(originalError) {
-    super('Failed to connect to database', 'connection', originalError);
-    this.name = 'DatabaseConnectionError';
-  }
-}
-
-export class DatabaseTimeoutError extends DatabaseError {
+/**
+ * Timeout Error - for operation timeouts
+ */
+export class TimeoutError extends BaseError {
   constructor(operation, timeout) {
-    super(`Database operation timed out after ${timeout}ms`, operation);
-    this.name = 'DatabaseTimeoutError';
+    super(`Operation timed out: ${operation} (${timeout}ms)`, 504);
+    this.type = 'timeout';
+    this.operation = operation;
     this.timeout = timeout;
   }
 }
 
-// Queue errors
-export class QueueError extends AppError {
-  constructor(message, operation = null) {
-    super(`Queue error: ${message}`, 500, true);
-    this.name = 'QueueError';
-    this.operation = operation;
+/**
+ * ZeroBounce specific error with error code support
+ */
+export class ZeroBounceError extends ExternalServiceError {
+  constructor(message, statusCode = 500, code = null) {
+    super('ZeroBounce', message, statusCode);
+    this.code = code;
   }
 }
 
-export class QueueProcessingError extends QueueError {
-  constructor(eventId, attempts, maxAttempts, originalError) {
-    super(`Failed to process event ${eventId} after ${attempts} attempts`);
-    this.name = 'QueueProcessingError';
-    this.eventId = eventId;
-    this.attempts = attempts;
-    this.maxAttempts = maxAttempts;
-    this.originalError = originalError;
+/**
+ * OpenCage specific error
+ */
+export class OpenCageError extends ExternalServiceError {
+  constructor(message, statusCode = 500) {
+    super('OpenCage', message, statusCode);
   }
 }
 
-// Timeout errors
-export class TimeoutError extends AppError {
-  constructor(operation, timeoutMs) {
-    super(`Operation '${operation}' timed out after ${timeoutMs}ms`, 504, true);
-    this.name = 'TimeoutError';
-    this.operation = operation;
-    this.timeoutMs = timeoutMs;
+/**
+ * HubSpot specific error
+ */
+export class HubSpotError extends ExternalServiceError {
+  constructor(message, statusCode = 500) {
+    super('HubSpot', message, statusCode);
   }
 }
 
-// Configuration errors
-export class ConfigurationError extends AppError {
-  constructor(message) {
-    super(`Configuration error: ${message}`, 500, false);
-    this.name = 'ConfigurationError';
+/**
+ * Queue Processing Error
+ */
+export class QueueError extends BaseError {
+  constructor(message, statusCode = 500) {
+    super(`Queue error: ${message}`, statusCode);
+    this.type = 'queue';
   }
 }
 
-// Not found error
-export class NotFoundError extends AppError {
-  constructor(resource, identifier) {
-    super(`${resource} not found${identifier ? ` with ID: ${identifier}` : ''}`, 404, true);
-    this.name = 'NotFoundError';
-    this.resource = resource;
-    this.identifier = identifier;
-  }
-}
-
-// Conflict error
-export class ConflictError extends AppError {
-  constructor(resource, identifier) {
-    super(`${resource} already exists${identifier ? ` with ID: ${identifier}` : ''}`, 409, true);
-    this.name = 'ConflictError';
-    this.resource = resource;
-    this.identifier = identifier;
-  }
-}
-
-// Error recovery utilities
+/**
+ * Error recovery utilities
+ */
 export class ErrorRecovery {
-  // Retry an operation with exponential backoff
-  static async withRetry(operation, maxRetries = 3, initialDelayMs = 500, shouldRetry = null) {
-    let lastError = null;
-    let delay = initialDelayMs;
+  /**
+   * Retry an operation with exponential backoff
+   * @param {Function} operation - The operation to retry
+   * @param {number} maxRetries - Maximum number of retries
+   * @param {number} initialDelay - Initial delay in milliseconds
+   * @param {Function} shouldRetry - Function to determine if should retry based on error
+   * @returns {Promise} The result of the operation
+   */
+  static async withRetry(operation, maxRetries = 3, initialDelay = 1000, shouldRetry = () => true) {
+    let lastError;
     
-    for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         return await operation(attempt);
       } catch (error) {
         lastError = error;
         
-        // Don't retry if we've reached max attempts or if shouldRetry returns false
-        if (attempt > maxRetries || (shouldRetry && !shouldRetry(error))) {
+        // Check if we should retry
+        if (attempt === maxRetries || !shouldRetry(error)) {
           throw error;
         }
         
-        // Wait before retrying
-        await ErrorRecovery.sleep(delay);
+        // Calculate delay with exponential backoff
+        const delay = initialDelay * Math.pow(2, attempt - 1);
         
-        // Exponential backoff
-        delay *= 2;
+        logger.debug(`Retrying operation after ${delay}ms`, {
+          attempt,
+          maxRetries,
+          error: error.message
+        });
+        
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
     
     throw lastError;
   }
   
-  // Operation with timeout
-  static async withTimeout(promise, timeoutMs, operation = 'unknown') {
+  /**
+   * Execute operation with timeout
+   * @param {Promise} promise - The promise to timeout
+   * @param {number} timeoutMs - Timeout in milliseconds
+   * @param {string} operation - Operation name for error message
+   * @returns {Promise} The result or timeout error
+   */
+  static async withTimeout(promise, timeoutMs, operation = 'Operation') {
     let timeoutId;
     
     const timeoutPromise = new Promise((_, reject) => {
@@ -247,98 +212,181 @@ export class ErrorRecovery {
     });
     
     try {
-      return await Promise.race([promise, timeoutPromise]);
-    } finally {
+      const result = await Promise.race([promise, timeoutPromise]);
       clearTimeout(timeoutId);
+      return result;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      throw error;
     }
   }
   
-  // Execute with fallback
-  static async withFallback(operation, fallbackOperation, shouldFallback = null) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (shouldFallback && !shouldFallback(error)) {
+  /**
+   * Circuit breaker pattern implementation
+   * @param {Function} operation - The operation to protect
+   * @param {Object} options - Circuit breaker options
+   * @returns {Function} Protected operation
+   */
+  static createCircuitBreaker(operation, options = {}) {
+    const {
+      threshold = 5,
+      timeout = 60000,
+      resetTimeout = 30000
+    } = options;
+    
+    let failures = 0;
+    let lastFailureTime = null;
+    let state = 'CLOSED'; // CLOSED, OPEN, HALF_OPEN
+    
+    return async function(...args) {
+      // Check if circuit should be reset
+      if (state === 'OPEN' && Date.now() - lastFailureTime > resetTimeout) {
+        state = 'HALF_OPEN';
+        failures = 0;
+      }
+      
+      // If circuit is open, fail fast
+      if (state === 'OPEN') {
+        throw new ExternalServiceError('Circuit breaker', 'Circuit is open', 503);
+      }
+      
+      try {
+        const result = await ErrorRecovery.withTimeout(
+          operation(...args),
+          timeout,
+          'Circuit breaker operation'
+        );
+        
+        // Reset on success
+        if (state === 'HALF_OPEN') {
+          state = 'CLOSED';
+          failures = 0;
+        }
+        
+        return result;
+      } catch (error) {
+        failures++;
+        lastFailureTime = Date.now();
+        
+        // Open circuit if threshold reached
+        if (failures >= threshold) {
+          state = 'OPEN';
+          logger.warn('Circuit breaker opened', {
+            failures,
+            threshold,
+            error: error.message
+          });
+        }
+        
         throw error;
       }
-      return fallbackOperation(error);
-    }
-  }
-  
-  static sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    };
   }
 }
 
-// Error handler middleware
-export const errorHandler = (err, req, res, next) => {
-  let error = err;
-  let statusCode = error.statusCode || 500;
-  let status = error.status || 'error';
-  let message = error.message || 'Something went wrong';
-  
-  // Handle Joi validation errors
-  if (error.name === 'ValidationError' && error.details) {
-    statusCode = 400;
-    status = 'fail';
-    message = 'Invalid input data';
-    
-    error = {
-      ...error,
-      validationErrors: error.details.map(detail => ({
-        field: detail.context.key,
-        message: detail.message
-      }))
-    };
-  }
-  
-  // Don't leak error details in production
-  if (process.env.NODE_ENV === 'production' && statusCode === 500) {
-    message = 'Internal server error';
-  }
-  
-  // Send error response
-  res.status(statusCode).json({
-    status,
-    message,
-    ...(process.env.NODE_ENV === 'development' && {
-      error: err,
-      stack: err.stack
-    })
+/**
+ * Error handler middleware
+ */
+export function handleError(error, req = null, res = null) {
+  // Log error
+  logger.error('Error occurred', error, {
+    isOperational: error.isOperational,
+    statusCode: error.statusCode,
+    type: error.type,
+    path: req?.path,
+    method: req?.method
   });
-};
+  
+  // If not operational, we should probably exit
+  if (!error.isOperational) {
+    logger.error('Non-operational error detected, consider restarting', error);
+  }
+  
+  // If we have a response object, send error response
+  if (res && !res.headersSent) {
+    const statusCode = error.statusCode || 500;
+    const message = error.isOperational ? error.message : 'Internal server error';
+    
+    res.status(statusCode).json({
+      success: false,
+      error: {
+        message,
+        type: error.type || 'unknown',
+        ...(error.retryAfter && { retryAfter: error.retryAfter }),
+        ...(process.env.NODE_ENV === 'development' && { stack: error.stack })
+      }
+    });
+  }
+  
+  return error;
+}
 
-// Async error wrapper
-export const asyncHandler = (fn) => (req, res, next) => {
-  Promise.resolve(fn(req, res, next)).catch(next);
-};
+/**
+ * Async error wrapper for Express routes
+ */
+export function asyncHandler(fn) {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
+/**
+ * Global error handlers
+ */
+export function setupGlobalErrorHandlers() {
+  // Handle unhandled promise rejections
+  process.on('unhandledRejection', (reason, promise) => {
+    logger.error('Unhandled Promise Rejection', reason, {
+      promise: promise.toString()
+    });
+    
+    // In production, we might want to exit
+    if (process.env.NODE_ENV === 'production') {
+      // Give time to log before exiting
+      setTimeout(() => {
+        process.exit(1);
+      }, 1000);
+    }
+  });
+  
+  // Handle uncaught exceptions
+  process.on('uncaughtException', (error) => {
+    logger.error('Uncaught Exception', error);
+    
+    // Always exit on uncaught exception
+    setTimeout(() => {
+      process.exit(1);
+    }, 1000);
+  });
+  
+  // Handle warnings
+  process.on('warning', (warning) => {
+    logger.warn('Process warning', {
+      name: warning.name,
+      message: warning.message,
+      stack: warning.stack
+    });
+  });
+}
 
 // Export all error classes and utilities
 export default {
-  AppError,
+  BaseError,
+  ValidationError,
   AuthenticationError,
   AuthorizationError,
-  InvalidApiKeyError,
-  InactiveClientError,
-  ValidationError,
-  InvalidInputError,
-  RateLimitError,
-  ExternalServiceError,
-  ZeroBounceError,
-  HubSpotError,
-  OpenCageError,
-  TwilioError,
-  DatabaseError,
-  DatabaseConnectionError,
-  DatabaseTimeoutError,
-  QueueError,
-  QueueProcessingError,
-  TimeoutError,
-  ConfigurationError,
   NotFoundError,
-  ConflictError,
+  RateLimitError,
+  DatabaseError,
+  ExternalServiceError,
+  ConfigurationError,
+  TimeoutError,
+  ZeroBounceError,
+  OpenCageError,
+  HubSpotError,
+  QueueError,
   ErrorRecovery,
-  // CircuitBreaker is removed and replaced with Opossum
-  errorHandler,
-  asyncHandler
+  handleError,
+  asyncHandler,
+  setupGlobalErrorHandlers
 };

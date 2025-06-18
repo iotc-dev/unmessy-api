@@ -172,11 +172,18 @@ class ZeroBounceService {
         
         const responseText = await response.text();
         
+        // Log response details for debugging
+        this.logger.debug('ZeroBounce API response', {
+          status: response.status,
+          contentType: response.headers.get('content-type'),
+          responseLength: responseText.length
+        });
+        
         if (!response.ok) {
           this.logger.error('ZeroBounce API error', {
             status: response.status,
             statusText: response.statusText,
-            responseText: responseText.substring(0, 200) // First 200 chars
+            responseText: responseText.substring(0, 500)
           });
           
           // Check for specific error patterns
@@ -185,7 +192,7 @@ class ZeroBounceService {
               'ZeroBounce API endpoint not found. Please check API configuration.',
               404
             );
-          } else if (response.status === 401 || responseText.includes('api_key')) {
+          } else if (response.status === 401 || responseText.includes('Invalid API')) {
             throw new ZeroBounceError('Invalid ZeroBounce API key', 401);
           }
           
@@ -200,8 +207,15 @@ class ZeroBounceService {
           data = JSON.parse(responseText);
         } catch (e) {
           this.logger.error('Failed to parse ZeroBounce response', {
-            responseText: responseText.substring(0, 200)
+            responseText: responseText.substring(0, 500),
+            parseError: e.message
           });
+          
+          // Check if response is HTML (common error page)
+          if (responseText.includes('<html') || responseText.includes('<!DOCTYPE')) {
+            throw new ZeroBounceError('Received HTML response instead of JSON. API may be down.', 503);
+          }
+          
           throw new ZeroBounceError('Invalid JSON response from ZeroBounce API');
         }
         
@@ -209,12 +223,16 @@ class ZeroBounceService {
           throw new ZeroBounceError('Empty response from ZeroBounce API');
         }
         
-        // Format response
+        // Format response - this will throw if insufficient credits
         return this.formatValidationResponse(data, email);
       },
       this.maxRetries,
       500, // Initial delay in ms
       (error) => {
+        // Don't retry on insufficient credits
+        if (error.code === 'insufficient_credits') {
+          return false;
+        }
         // Only retry on network errors or 5xx errors
         return (
           error.message?.includes('network') ||
@@ -231,11 +249,23 @@ class ZeroBounceService {
   
   // Format API response
   formatValidationResponse(data, email) {
+    // Check for insufficient credits
+    if (data.status === 'unknown' && data.sub_status === 'insufficient_credits') {
+      this.logger.warn('ZeroBounce insufficient credits', { email });
+      // Throw a specific error that can be caught and handled
+      throw new ZeroBounceError('Insufficient ZeroBounce credits', 402, 'insufficient_credits');
+    }
+    
+    // Check for other error conditions
+    if (data.error) {
+      throw new ZeroBounceError(data.error, 400);
+    }
+    
     // Basic validation status
     const isValid = data.status === 'valid';
     
     return {
-      email,
+      email: data.address || email,
       valid: isValid,
       status: data.status,
       subStatus: data.sub_status,
@@ -260,7 +290,7 @@ class ZeroBounceService {
     };
   }
   
-  // Check if we have sufficient API credits
+  // Check if we have sufficient API credits (only for admin/monitoring use)
   async checkCredits() {
     // Check if API key is configured
     if (!this.apiKey || this.apiKey.trim() === '') {
@@ -310,24 +340,14 @@ class ZeroBounceService {
           this.logger.error('ZeroBounce credits check failed', {
             status: response.status,
             statusText: response.statusText,
-            responseText: responseText.substring(0, 200),
+            responseText: responseText.substring(0, 500),
             endpoint: baseUrl
           });
           
-          // Check for specific errors
-          if (response.status === 404) {
-            lastError = new ZeroBounceError(
-              'ZeroBounce API endpoint not found. Please check API configuration.',
-              404
-            );
-          } else if (response.status === 401 || responseText.includes('Invalid API key')) {
-            throw new ZeroBounceError('Invalid ZeroBounce API key', 401);
-          } else {
-            lastError = new ZeroBounceError(
-              `Failed to get credits: ${response.status} ${response.statusText}`,
-              response.status
-            );
-          }
+          lastError = new ZeroBounceError(
+            `Failed to get credits: ${response.status} ${response.statusText}`,
+            response.status
+          );
           continue; // Try next endpoint
         }
         
@@ -336,11 +356,13 @@ class ZeroBounceService {
           data = JSON.parse(responseText);
         } catch (e) {
           this.logger.error('Failed to parse credits response', {
-            responseText: responseText.substring(0, 200)
+            responseText: responseText.substring(0, 500),
+            parseError: e.message
           });
           continue;
         }
         
+        // Check different possible response formats
         if (data && typeof data.Credits === 'number') {
           // Update cache
           this.creditsCache.credits = data.Credits;
@@ -450,6 +472,7 @@ class ZeroBounceService {
         status: 'unhealthy',
         circuitBreaker: this.circuitBreaker.status.name,
         error: error.message,
+        errorCode: error.statusCode,
         enabled: config.services.zeroBounce.enabled
       };
     }

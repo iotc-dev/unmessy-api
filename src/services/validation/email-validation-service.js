@@ -40,7 +40,7 @@ class EmailValidationService {
   
   async loadNormalizationData() {
     try {
-  // Load all data in parallel from database using proper Supabase methods
+      // Load all data in parallel from database using proper Supabase methods
       const [
         validDomainsData, 
         invalidDomainsData, 
@@ -492,17 +492,9 @@ class EmailValidationService {
       }
       
       // Step 4: Call ZeroBounce for ALL emails (even valid domains) after typo correction
-      if (useZeroBounce && this.zeroBounce) {
+      if (useZeroBounce && this.zeroBounce && config.services.zeroBounce.enabled) {
         try {
-          // Check ZeroBounce credits first
-          const credits = await this.zeroBounce.checkCredits();
-          if (credits <= 0) {
-            this.logger.warn('Insufficient ZeroBounce credits', { credits });
-            // If no credits, fall back to basic validation
-            return this.performBasicValidation(email, correctedEmail, corrected, suggestions, clientId);
-          }
-          
-          // Validate with ZeroBounce
+          // NO CREDIT CHECK - Just validate directly
           let zbResult = await this.zeroBounce.validateEmail(correctedEmail);
           let finalEmail = correctedEmail;
           let totalCorrections = corrected;
@@ -549,8 +541,18 @@ class EmailValidationService {
           return finalResult;
           
         } catch (error) {
+          // Handle specific ZeroBounce errors
+          if (error.code === 'insufficient_credits' || 
+              (error.message && error.message.toLowerCase().includes('insufficient') && error.message.toLowerCase().includes('credits'))) {
+            this.logger.warn('ZeroBounce insufficient credits, falling back to basic validation', { email: correctedEmail });
+            // Fall back to basic validation
+            return this.performBasicValidation(email, correctedEmail, corrected, suggestions, clientId);
+          }
+          
+          // For other errors, log and fall back
           this.logger.error('ZeroBounce validation failed', error, { email: correctedEmail });
-          // If ZeroBounce fails, fall back to basic validation
+          
+          // If ZeroBounce fails for any reason, fall back to basic validation
           return this.performBasicValidation(email, correctedEmail, corrected, suggestions, clientId);
         }
       }
