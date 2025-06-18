@@ -61,13 +61,14 @@ export const config = {
   services: {
     // ZeroBounce (Email Validation)
     zeroBounce: {
-      apiKey: getOptional('ZERO_BOUNCE_API_KEY', ''),
-      baseUrl: getOptional('ZERO_BOUNCE_BASE_URL', 'https://api.zerobounce.net/v2'),
-      enabled: parseBoolean(process.env.USE_ZERO_BOUNCE, false),
-      timeout: parseInteger(process.env.ZERO_BOUNCE_TIMEOUT, 6000),
-      retryTimeout: parseInteger(process.env.ZERO_BOUNCE_RETRY_TIMEOUT, 8000),
-      maxRetries: parseInteger(process.env.ZERO_BOUNCE_MAX_RETRIES, 3)
-    },
+    apiKey: getOptional('ZERO_BOUNCE_API_KEY', ''),
+    enabled: parseBoolean(process.env.USE_ZERO_BOUNCE, false),
+    timeout: parseInteger(process.env.ZERO_BOUNCE_TIMEOUT, 6000),
+    retryTimeout: parseInteger(process.env.ZERO_BOUNCE_RETRY_TIMEOUT, 8000),
+    maxRetries: parseInteger(process.env.ZERO_BOUNCE_MAX_RETRIES, 3),
+    baseUrl: getOptional('ZERO_BOUNCE_BASE_URL', 'https://api.zerobounce.net/v2'),
+    useUSEndpoint: parseBoolean(process.env.ZERO_BOUNCE_USE_US_ENDPOINT, false)
+  },
     
     // OpenCage (Address Geocoding)
     openCage: {

@@ -14,7 +14,10 @@ const logger = createServiceLogger('zerobounce');
 class ZeroBounceService {
   constructor() {
     this.logger = logger;
-    this.baseUrl = 'https://api.zerobounce.net/v2'; // Add the base URL
+    // Try USA endpoint first, then fall back to default
+    this.baseUrl = config.services.zeroBounce.baseUrl || 'https://api.zerobounce.net/v2';
+    this.baseUrlUS = 'https://api-us.zerobounce.net/v2';
+    this.useUSEndpoint = config.services.zeroBounce.useUSEndpoint || false;
     this.apiKey = config.services.zeroBounce.apiKey;
     this.timeout = config.services.zeroBounce.timeout;
     this.retryTimeout = config.services.zeroBounce.retryTimeout;
@@ -135,11 +138,17 @@ class ZeroBounceService {
           ip_address: ipAddress || ''
         };
         
-        const url = new URL('/validate', this.baseUrl);
+        // Use the endpoint that worked for credits, or try both
+        const baseUrl = this.useUSEndpoint ? this.baseUrlUS : this.baseUrl;
+        const url = new URL('/validate', baseUrl);
         
         // Add params to URL
         Object.keys(params).forEach(key => {
           url.searchParams.append(key, params[key]);
+        });
+        
+        this.logger.debug('Calling ZeroBounce validate API', {
+          endpoint: url.toString().replace(this.apiKey, 'REDACTED')
         });
         
         // Execute API call with timeout
@@ -223,40 +232,74 @@ class ZeroBounceService {
       return this.creditsCache.credits;
     }
     
-    try {
-      const url = new URL('/getcredits', this.baseUrl);
-      url.searchParams.append('api_key', this.apiKey);
-      
-      const response = await fetch(url.toString());
-      
-      if (!response.ok) {
-        throw new ZeroBounceError(
-          `Failed to get credits: ${response.status} ${response.statusText}`,
-          response.status
-        );
-      }
-      
-      const data = await response.json();
-      
-      if (data && typeof data.Credits === 'number') {
-        // Update cache
-        this.creditsCache.credits = data.Credits;
-        this.creditsCache.timestamp = Date.now();
+    // Try both endpoints if needed
+    const endpoints = this.useUSEndpoint ? 
+      [this.baseUrlUS, this.baseUrl] : 
+      [this.baseUrl, this.baseUrlUS];
+    
+    let lastError = null;
+    
+    for (const baseUrl of endpoints) {
+      try {
+        const url = new URL('/getcredits', baseUrl);
+        url.searchParams.append('api_key', this.apiKey);
         
-        return data.Credits;
+        this.logger.debug('Checking ZeroBounce credits', { 
+          endpoint: url.toString().replace(this.apiKey, 'REDACTED') 
+        });
+        
+        const response = await fetch(url.toString());
+        
+        if (!response.ok) {
+          lastError = new ZeroBounceError(
+            `Failed to get credits: ${response.status} ${response.statusText}`,
+            response.status
+          );
+          continue; // Try next endpoint
+        }
+        
+        const data = await response.json();
+        
+        if (data && typeof data.Credits === 'number') {
+          // Update cache
+          this.creditsCache.credits = data.Credits;
+          this.creditsCache.timestamp = Date.now();
+          
+          // Remember which endpoint worked
+          if (baseUrl === this.baseUrlUS) {
+            this.useUSEndpoint = true;
+          }
+          
+          this.logger.info('ZeroBounce credits retrieved', { 
+            credits: data.Credits,
+            endpoint: baseUrl 
+          });
+          
+          return data.Credits;
+        }
+        
+        if (data && data.Credits === -1) {
+          throw new ZeroBounceError('Invalid API key', 401);
+        }
+        
+        throw new ZeroBounceError('Invalid response format for credits check');
+      } catch (error) {
+        lastError = error;
+        this.logger.debug('Failed to get credits from endpoint', { 
+          endpoint: baseUrl,
+          error: error.message 
+        });
       }
-      
-      throw new ZeroBounceError('Invalid response format for credits check');
-    } catch (error) {
-      this.logger.error('Failed to check ZeroBounce credits', error);
-      
-      // Return cached credits if available
-      if (this.creditsCache.credits !== null) {
-        return this.creditsCache.credits;
-      }
-      
-      throw error;
     }
+    
+    this.logger.error('Failed to check ZeroBounce credits from all endpoints', lastError);
+    
+    // Return cached credits if available
+    if (this.creditsCache.credits !== null) {
+      return this.creditsCache.credits;
+    }
+    
+    throw lastError || new ZeroBounceError('Failed to check credits from all endpoints');
   }
   
   // API Call Helper
