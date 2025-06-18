@@ -76,8 +76,8 @@ app.use(async (req, res, next) => {
 
 // Set up API routes
 app.use('/api/validate', validateRoutes);
-// Temporarily disable HubSpot routes
-// app.use('/api/hubspot', hubspotWebhookRoutes);
+
+app.use('/api/hubspot', hubspotWebhookRoutes);
 app.use('/api/health', healthRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/cron', cronRoutes);
