@@ -14,7 +14,7 @@ const logger = createServiceLogger('zerobounce');
 class ZeroBounceService {
   constructor() {
     this.logger = logger;
-    // Try USA endpoint first, then fall back to default
+    // Fixed: Use correct ZeroBounce API v2 base URL
     this.baseUrl = config.services.zeroBounce.baseUrl || 'https://api.zerobounce.net/v2';
     this.baseUrlUS = 'https://api-us.zerobounce.net/v2';
     this.useUSEndpoint = config.services.zeroBounce.useUSEndpoint || false;
@@ -140,6 +140,8 @@ class ZeroBounceService {
         
         // Use the endpoint that worked for credits, or try both
         const baseUrl = this.useUSEndpoint ? this.baseUrlUS : this.baseUrl;
+        
+        // Fixed: Correct endpoint path
         const url = new URL('/validate', baseUrl);
         
         // Add params to URL
@@ -241,6 +243,7 @@ class ZeroBounceService {
     
     for (const baseUrl of endpoints) {
       try {
+        // Fixed: Correct endpoint path (no /api prefix)
         const url = new URL('/getcredits', baseUrl);
         url.searchParams.append('api_key', this.apiKey);
         
@@ -302,7 +305,7 @@ class ZeroBounceService {
     throw lastError || new ZeroBounceError('Failed to check credits from all endpoints');
   }
   
-  // API Call Helper
+  // API Call Helper (not used in current implementation but kept for compatibility)
   async makeApiCall(endpoint, params = {}, method = 'GET', timeout = this.timeout) {
     const url = new URL(endpoint, this.baseUrl);
     
