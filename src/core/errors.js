@@ -5,31 +5,50 @@ const logger = createServiceLogger('errors');
 
 /**
  * Base Error class for all custom errors
+ * Named AppError to match existing imports
  */
-export class BaseError extends Error {
+export class AppError extends Error {
   constructor(message, statusCode = 500, isOperational = true) {
     super(message);
     this.name = this.constructor.name;
     this.statusCode = statusCode;
+    this.status = `${statusCode}`.startsWith('4') ? 'fail' : 'error';
     this.isOperational = isOperational;
+    this.timestamp = new Date().toISOString();
     Error.captureStackTrace(this, this.constructor);
   }
+  
+  toJSON() {
+    return {
+      name: this.name,
+      message: this.message,
+      statusCode: this.statusCode,
+      status: this.status,
+      isOperational: this.isOperational,
+      timestamp: this.timestamp,
+      stack: this.stack
+    };
+  }
 }
+
+// Alias for backward compatibility
+export const BaseError = AppError;
 
 /**
  * Validation Error - for input validation failures
  */
-export class ValidationError extends BaseError {
-  constructor(message, statusCode = 400) {
+export class ValidationError extends AppError {
+  constructor(message, statusCode = 400, validationErrors = []) {
     super(message, statusCode);
     this.type = 'validation';
+    this.validationErrors = validationErrors;
   }
 }
 
 /**
  * Authentication Error - for auth failures
  */
-export class AuthenticationError extends BaseError {
+export class AuthenticationError extends AppError {
   constructor(message = 'Authentication failed', statusCode = 401) {
     super(message, statusCode);
     this.type = 'authentication';
@@ -39,7 +58,7 @@ export class AuthenticationError extends BaseError {
 /**
  * Authorization Error - for permission failures
  */
-export class AuthorizationError extends BaseError {
+export class AuthorizationError extends AppError {
   constructor(message = 'Access denied', statusCode = 403) {
     super(message, statusCode);
     this.type = 'authorization';
@@ -49,7 +68,7 @@ export class AuthorizationError extends BaseError {
 /**
  * Not Found Error - for missing resources
  */
-export class NotFoundError extends BaseError {
+export class NotFoundError extends AppError {
   constructor(resource, identifier) {
     super(`${resource} not found${identifier ? `: ${identifier}` : ''}`, 404);
     this.type = 'not_found';
@@ -61,7 +80,7 @@ export class NotFoundError extends BaseError {
 /**
  * Rate Limit Error - for exceeding rate limits
  */
-export class RateLimitError extends BaseError {
+export class RateLimitError extends AppError {
   constructor(message = 'Rate limit exceeded', retryAfter = null) {
     super(message, 429);
     this.type = 'rate_limit';
@@ -72,7 +91,7 @@ export class RateLimitError extends BaseError {
 /**
  * Database Error - for database operation failures
  */
-export class DatabaseError extends BaseError {
+export class DatabaseError extends AppError {
   constructor(message, originalError = null) {
     super(message, 500);
     this.type = 'database';
@@ -83,7 +102,7 @@ export class DatabaseError extends BaseError {
 /**
  * External Service Error - for third-party API failures
  */
-export class ExternalServiceError extends BaseError {
+export class ExternalServiceError extends AppError {
   constructor(service, message, statusCode = 503) {
     super(`${service} service error: ${message}`, statusCode);
     this.type = 'external_service';
@@ -94,7 +113,7 @@ export class ExternalServiceError extends BaseError {
 /**
  * Configuration Error - for missing or invalid configuration
  */
-export class ConfigurationError extends BaseError {
+export class ConfigurationError extends AppError {
   constructor(message) {
     super(`Configuration error: ${message}`, 500);
     this.type = 'configuration';
@@ -105,7 +124,7 @@ export class ConfigurationError extends BaseError {
 /**
  * Timeout Error - for operation timeouts
  */
-export class TimeoutError extends BaseError {
+export class TimeoutError extends AppError {
   constructor(operation, timeout) {
     super(`Operation timed out: ${operation} (${timeout}ms)`, 504);
     this.type = 'timeout';
@@ -371,6 +390,7 @@ export function setupGlobalErrorHandlers() {
 
 // Export all error classes and utilities
 export default {
+  AppError,
   BaseError,
   ValidationError,
   AuthenticationError,
