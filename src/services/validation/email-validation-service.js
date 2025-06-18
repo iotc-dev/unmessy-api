@@ -449,7 +449,7 @@ class EmailValidationService {
           this.logger.warn('Failed to get client account type', { clientId, error: error.message });
         }
       }
-      // Step 1: Check database for valid emails (previously validated as "Unlikely to bounce")
+      // STEP 1: Check database for valid emails (previously validated as "Unlikely to bounce")
       if (useCache) {
         const existingValidEmail = await this.checkEmailCache(email);
         if (existingValidEmail) {
@@ -459,7 +459,7 @@ class EmailValidationService {
         }
       }
       
-      // Step 2: Format check using validator.js
+      // STEP 2: Format check using validator.js
       const isValidFormat = validator.isEmail(email, {
         allow_display_name: false,
         require_display_name: false,
@@ -503,13 +503,13 @@ class EmailValidationService {
         }, clientId, accountType);
       }
       
-      // Step 3: Perform typo corrections
+      // STEP 3: Perform typo corrections
       const { corrected, email: correctedEmail, suggestions } = await this.correctEmailTypos(email);
       
       // Extract domain
       const domain = correctedEmail.split('@')[1];
       
-      // Step 4: Check invalid domains (return as "Likely to bounce")
+      // STEP 4: Check invalid domains (return as "Likely to bounce")
       if (this.invalidDomains.has(domain)) {
         this.logger.debug('Domain is in invalid list', { domain });
         return this.buildValidationResult(email, {
@@ -526,10 +526,11 @@ class EmailValidationService {
         }, clientId, accountType);
       }
       
-      // Step 5: MX record lookup (without using ZeroBounce)
-      const mxCheck = await this.checkMxRecords(domain);
+      // STEP 5: MX record lookup (to reduce external API calls)
+      let mxCheck = await this.checkMxRecords(domain);
       
       if (!mxCheck.hasMxRecords && !mxCheck.skipped) {
+        // No MX records found - return as invalid without calling ZeroBounce
         return this.buildValidationResult(email, {
           currentEmail: correctedEmail,
           formatValid: true,
@@ -549,7 +550,7 @@ class EmailValidationService {
         }, clientId, accountType);
       }
       
-      // Step 6: ZeroBounce validation (including "did you mean" handling)
+      // STEP 6: ZeroBounce validation (only if MX records exist)
       if (useZeroBounce && this.zeroBounce && config.services.zeroBounce.enabled) {
         try {
           // Direct validation without credit check
@@ -592,7 +593,7 @@ class EmailValidationService {
             accountType
           );
           
-          // Step 7: Save to database only if "Unlikely to bounce"
+          // STEP 7: Save to database only if "Unlikely to bounce"
           if (useCache && finalResult.status === 'valid' && finalResult.um_bounce_status === 'Unlikely to bounce') {
             await this.saveEmailCache(email, finalResult, clientId);
           }
@@ -683,18 +684,18 @@ class EmailValidationService {
     
     // Build validation steps
     const validationSteps = [
-      { step: 'database_check', passed: false, note: 'Email not found in database' },
-      { step: 'format_check', passed: true, validator: 'validator.js' },
-      { step: 'typo_correction', applied: wasCorrected, corrected: finalEmail },
-      { step: 'invalid_domain_check', passed: true },
+      { step: '1_database_check', passed: false, note: 'Email not found in database' },
+      { step: '2_format_check', passed: true, validator: 'validator.js' },
+      { step: '3_typo_correction', applied: wasCorrected, corrected: finalEmail },
+      { step: '4_invalid_domain_check', passed: true },
       { 
-        step: 'mx_record_check', 
-        performed: mxCheck && !mxCheck.skipped, 
-        hasMxRecords: mxCheck?.hasMxRecords,
-        primaryMx: mxCheck?.primaryMx
+        step: '5_mx_record_check', 
+        performed: mxCheck ? !mxCheck.skipped : true, 
+        hasMxRecords: mxCheck ? mxCheck.hasMxRecords : (zbResult.mxFound === 'true' || zbResult.mxFound === true),
+        primaryMx: mxCheck ? mxCheck.primaryMx : zbResult.mxRecord
       },
       { 
-        step: 'zerobounce_validation', 
+        step: '6_zerobounce_validation', 
         performed: true, 
         status: zbResult.status,
         subStatus: zbResult.subStatus,
@@ -730,7 +731,13 @@ class EmailValidationService {
         hasMxRecords: mxCheck.hasMxRecords,
         primaryMx: mxCheck.primaryMx,
         recordCount: mxCheck.mxRecords?.length || 0
-      } : null,
+      } : {
+        // If no MX check was done but ZeroBounce found MX records
+        checked: true,
+        hasMxRecords: zbResult.mxFound === 'true' || zbResult.mxFound === true,
+        primaryMx: zbResult.mxRecord || null,
+        recordCount: zbResult.mxFound === 'true' || zbResult.mxFound === true ? 1 : 0
+      },
       
       // ZeroBounce data
       zeroBounce: {
@@ -780,14 +787,14 @@ class EmailValidationService {
     
     // Build validation steps
     const validationSteps = [
-      { step: 'database_check', passed: false, note: 'Email not found in database' },
-      { step: 'format_check', passed: validationData.formatValid !== false },
-      { step: 'typo_correction', applied: validationData.wasCorrected, corrected: validationData.currentEmail }
+      { step: '1_database_check', passed: false, note: 'Email not found in database' },
+      { step: '2_format_check', passed: validationData.formatValid !== false },
+      { step: '3_typo_correction', applied: validationData.wasCorrected, corrected: validationData.currentEmail }
     ];
     
     if (validationData.formatValid) {
       validationSteps.push({ 
-        step: 'invalid_domain_check', 
+        step: '4_invalid_domain_check', 
         passed: !validationData.isInvalidDomain,
         isInvalidDomain: validationData.isInvalidDomain 
       });
@@ -796,7 +803,7 @@ class EmailValidationService {
     // Add MX check step if it was performed
     if (validationData.mxInfo && validationData.mxInfo.checked) {
       validationSteps.push({
-        step: 'mx_record_check',
+        step: '5_mx_record_check',
         passed: validationData.mxRecordsFound,
         hasMxRecords: validationData.mxRecordsFound,
         primaryMx: validationData.mxInfo.primaryMx
@@ -884,7 +891,7 @@ class EmailValidationService {
         daysSinceValidation: Math.floor(validationAge / (24 * 60 * 60 * 1000)),
         // Add validation steps to show it came from database
         validationSteps: [
-          { step: 'database_check', passed: true, note: 'Email found in database as valid' }
+          { step: '1_database_check', passed: true, note: 'Email found in database as valid' }
         ]
       };
     } catch (error) {
