@@ -10,13 +10,12 @@ import {
 } from '../core/errors.js';
 
 // Import validation services
-import { EmailValidationService } from './validation/email-validation-service.js';
+import { emailValidationService } from './validation/email-validation-service.js';
 import { NameValidationService } from './validation/name-validation-service.js';
 import { PhoneValidationService } from './validation/phone-validation-service.js';
 import { AddressValidationService } from './validation/address-validation-service.js';
 
 // Import external services
-import { zeroBounceService } from './external/zerobounce.js';
 import { openCageService } from './external/opencage.js';
 
 const logger = createServiceLogger('validation-service');
@@ -25,14 +24,15 @@ class ValidationService {
   constructor() {
     this.logger = logger;
     
-    // Initialize validation services
-    this.emailValidator = new EmailValidationService();
+    // Use the singleton email validator instance
+    this.emailValidator = emailValidationService;
+    
+    // Initialize other validation services
     this.nameValidator = new NameValidationService();
     this.phoneValidator = new PhoneValidationService();
     this.addressValidator = new AddressValidationService();
     
-    // External services
-    this.zeroBounce = zeroBounceService;
+    // External services (only OpenCage now, ZeroBounce is integrated in email validator)
     this.openCage = openCageService;
     
     // Cache for batch operations
@@ -65,11 +65,11 @@ class ValidationService {
     }
   }
   
-  // Email validation
+  // Email validation - now simplified to use the integrated email validator
   async validateEmail(email, options = {}) {
     const {
       clientId = null,
-      skipExternal = false,
+      skipZeroBounce = false,
       timeout = config.services.zeroBounce.timeout,
       useCache = true
     } = options;
@@ -77,58 +77,18 @@ class ValidationService {
     this.logger.debug('Starting email validation', {
       email,
       clientId,
-      skipExternal,
-      timeout
+      skipZeroBounce,
+      useCache
     });
     
     try {
-      // Quick validation first
-      const quickResult = await this.emailValidator.quickValidate(email, clientId);
-      
-      if (!quickResult.formatValid || quickResult.isInvalidDomain) {
-        return quickResult;
-      }
-      
-      // Check cache if enabled
-      if (useCache) {
-        const cached = await this.emailValidator.checkEmailCache(quickResult.currentEmail);
-        if (cached) {
-          return { ...cached, isFromCache: true };
-        }
-      }
-      
-      // Enhance with external validation if needed
-      let result = { ...quickResult };
-      
-      if (!skipExternal && config.services.zeroBounce.enabled && quickResult.recheckNeeded) {
-        try {
-          const externalResult = await ErrorRecovery.withTimeout(
-            this.zeroBounce.validateEmail(quickResult.currentEmail),
-            timeout,
-            'ZeroBounce validation'
-          );
-          
-          // Merge results
-          result = this.mergeEmailResults(result, externalResult);
-        } catch (error) {
-          this.logger.warn('External email validation failed', error, {
-            email: quickResult.currentEmail,
-            service: 'ZeroBounce'
-          });
-          
-          // Continue with quick validation result
-          result.validationSteps.push({
-            step: 'external_validation',
-            error: error.message,
-            skipped: true
-          });
-        }
-      }
-      
-      // Save to cache if valid
-      if (useCache && result.status === 'valid') {
-        await this.emailValidator.saveEmailCache(email, result, clientId);
-      }
+      // Use the integrated email validation service
+      // It handles everything: cache check, format validation, typo correction, ZeroBounce
+      const result = await this.emailValidator.validateEmail(email, {
+        clientId,
+        useCache,
+        useZeroBounce: !skipZeroBounce
+      });
       
       return result;
     } catch (error) {
@@ -243,36 +203,66 @@ class ValidationService {
     } = options;
     
     this.logger.debug('Starting address validation', {
-      address: typeof address === 'string' ? address : 'complex object',
+      address: typeof address === 'string' ? address : 'Object',
       country,
-      clientId,
-      skipExternal
+      skipExternal,
+      clientId
     });
     
     try {
-      // Validate address using address service
-      const validationResult = await this.addressValidator.validateAddress(address, {
-        useOpenCage: !skipExternal && config.services.openCage.enabled && config.validation.address.geocode,
-        clientId,
+      // Parse and validate address
+      const parsedResult = await this.addressValidator.validateAddress(address, {
         country,
-        timeout
+        clientId,
+        useCache
       });
       
-      // Check cache if enabled
-      if (useCache && validationResult.valid) {
-        const cacheKey = this.addressValidator.generateCacheKey(validationResult);
-        const cached = await this.addressValidator.checkAddressCache(cacheKey);
+      if (!parsedResult.valid) {
+        return parsedResult;
+      }
+      
+      // Check cache
+      if (useCache && parsedResult.formattedAddress) {
+        const cached = await this.addressValidator.checkAddressCache(parsedResult.formattedAddress);
         if (cached) {
           return { ...cached, isFromCache: true };
         }
       }
       
-      // Save to cache if valid
-      if (useCache && validationResult.valid) {
-        await this.addressValidator.saveAddressCache(address, validationResult, clientId);
+      // Enhance with geocoding if needed
+      let result = { ...parsedResult };
+      
+      if (!skipExternal && config.services.openCage.enabled && config.validation.address.geocode) {
+        try {
+          const geocodeResult = await ErrorRecovery.withTimeout(
+            this.openCage.geocode(parsedResult.formattedAddress, { country }),
+            timeout,
+            'OpenCage geocoding'
+          );
+          
+          // Merge results
+          result = this.mergeAddressResults(result, geocodeResult);
+        } catch (error) {
+          this.logger.warn('External address validation failed', error, {
+            address: parsedResult.formattedAddress,
+            service: 'OpenCage'
+          });
+          
+          // Continue with parsed result
+          result.validationSteps.push({
+            step: 'geocoding',
+            error: error.message,
+            skipped: true
+          });
+        }
       }
       
-      return validationResult;
+      // Save to cache if valid
+      if (useCache && result.valid) {
+        await this.addressValidator.saveAddressCache(address, result, clientId);
+      }
+      
+      return result;
     } catch (error) {
       this.logger.error('Address validation failed', error, { address });
       throw new ValidationError(`Address validation failed: ${error.message}`);
@@ -282,49 +272,52 @@ class ValidationService {
   // Batch validation
   async validateBatch(items, validationType, options = {}) {
     const {
-      clientId = null,
-      concurrency = 10,
-      skipExternal = false,
-      continueOnError = true
+      chunkSize = 100,
+      delayBetweenChunks = 1000,
+      continueOnError = true,
+      ...validationOptions
     } = options;
     
-    this.logger.info('Starting batch validation', {
-      type: validationType,
-      count: items.length,
-      clientId,
-      concurrency
-    });
+    // Check if batch is cached
+    const cacheKey = `${validationType}-${JSON.stringify(items)}`;
+    if (this.batchCache.has(cacheKey)) {
+      const cached = this.batchCache.get(cacheKey);
+      if (Date.now() - cached.timestamp < this.batchCacheTTL) {
+        return cached.result;
+      }
+      this.batchCache.delete(cacheKey);
+    }
     
     const results = [];
     const errors = [];
     
     // Process in chunks
-    for (let i = 0; i < items.length; i += concurrency) {
-      const chunk = items.slice(i, i + concurrency);
+    for (let i = 0; i < items.length; i += chunkSize) {
+      const chunk = items.slice(i, Math.min(i + chunkSize, items.length));
       
+      // Process chunk
       const chunkPromises = chunk.map(async (item, index) => {
         try {
           let result;
-          const itemIndex = i + index;
           
           switch (validationType) {
             case 'email':
-              result = await this.validateEmail(item, { clientId, skipExternal });
+              result = await this.validateEmail(item, validationOptions);
               break;
             case 'name':
-              result = await this.validateName(item, { clientId });
+              result = await this.validateName(item, validationOptions);
               break;
             case 'phone':
-              result = await this.validatePhone(item, { clientId, skipExternal });
+              result = await this.validatePhone(item, validationOptions);
               break;
             case 'address':
-              result = await this.validateAddress(item, { clientId, skipExternal });
+              result = await this.validateAddress(item, validationOptions);
               break;
             default:
               throw new ValidationError(`Unknown validation type: ${validationType}`);
           }
           
-          results[itemIndex] = { success: true, result };
+          results[i + index] = { success: true, data: result };
         } catch (error) {
           const itemIndex = i + index;
           errors.push({ index: itemIndex, item, error: error.message });
@@ -338,72 +331,44 @@ class ValidationService {
       });
       
       await Promise.all(chunkPromises);
+      
+      // Delay between chunks
+      if (i + chunkSize < items.length && delayBetweenChunks > 0) {
+        await new Promise(resolve => setTimeout(resolve, delayBetweenChunks));
+      }
     }
     
-    this.logger.info('Batch validation completed', {
-      type: validationType,
-      total: items.length,
-      successful: results.filter(r => r.success).length,
-      failed: errors.length
-    });
-    
-    return {
+    const batchResult = {
       results,
       errors,
       summary: {
         total: items.length,
-        successful: results.filter(r => r.success).length,
+        successful: results.filter(r => r?.success).length,
         failed: errors.length
       }
     };
-  }
-  
-  // Helper methods for merging results
-  mergeEmailResults(quickResult, externalResult) {
-    // Handle the email suggestion from ZeroBounce
-    let finalEmail = quickResult.currentEmail;
-    let wasCorrected = quickResult.wasCorrected;
     
-    if (externalResult.didYouMean && externalResult.didYouMean !== quickResult.currentEmail) {
-      finalEmail = externalResult.didYouMean;
-      wasCorrected = true;
+    // Cache result
+    this.batchCache.set(cacheKey, {
+      result: batchResult,
+      timestamp: Date.now()
+    });
+    
+    // Clean up old cache entries
+    if (this.batchCache.size > 1000) {
+      const oldestKey = this.batchCache.keys().next().value;
+      this.batchCache.delete(oldestKey);
     }
     
-    return {
-      ...quickResult,
-      currentEmail: finalEmail,
-      um_email: finalEmail,
-      wasCorrected,
-      status: externalResult.valid ? 'valid' : 'invalid',
-      subStatus: externalResult.subStatus || quickResult.subStatus,
-      freeEmail: externalResult.freeEmail,
-      roleEmail: externalResult.role,
-      catchAll: externalResult.catchAll,
-      disposable: externalResult.disposable,
-      toxic: externalResult.toxic,
-      doNotMail: externalResult.doNotMail,
-      score: externalResult.score,
-      mxFound: externalResult.mxFound,
-      mxRecord: externalResult.mxRecord,
-      smtpProvider: externalResult.smtpProvider,
-      um_email_status: wasCorrected ? 'Changed' : 'Unchanged',
-      um_bounce_status: externalResult.valid ? 'Unlikely to bounce' : 'Likely to bounce',
-      externalValidation: {
-        provider: 'zerobounce',
-        timestamp: new Date().toISOString(),
-        raw: externalResult.rawResponse
-      },
-      validationSteps: [
-        ...quickResult.validationSteps,
-        {
-          step: 'external_validation',
-          provider: 'zerobounce',
-          passed: externalResult.valid
-        }
-      ]
-    };
+    this.logger.info('Batch validation completed', {
+      type: validationType,
+      ...batchResult.summary
+    });
+    
+    return batchResult;
   }
   
+  // Helper method for merging address results
   mergeAddressResults(parsedResult, geocodeResult) {
     return {
       ...parsedResult,
@@ -438,11 +403,11 @@ class ValidationService {
       external: {
         zeroBounce: {
           enabled: config.services.zeroBounce.enabled,
-          state: this.zeroBounce.getCircuitBreakerState()
+          integrated: 'In EmailValidationService'
         },
         openCage: {
           enabled: config.services.openCage.enabled,
-          state: this.openCage.getCircuitBreakerState()
+          state: this.openCage.getCircuitBreakerState ? this.openCage.getCircuitBreakerState() : 'unknown'
         }
       },
       cache: {
@@ -461,29 +426,29 @@ class ValidationService {
       phone: 'unknown',
       address: 'unknown',
       external: {
-        zeroBounce: 'unknown',
+        zeroBounce: 'integrated',
         openCage: 'unknown'
       }
     };
     
     try {
-      // Test validators
-      const emailTest = await this.validateEmail('test@example.com', { skipExternal: true });
+      // Test validators with simple test data
+      const emailTest = await this.validateEmail('test@example.com', { skipZeroBounce: true });
       checks.email = emailTest ? 'healthy' : 'unhealthy';
       
       const nameTest = await this.validateName('John Doe');
       checks.name = nameTest ? 'healthy' : 'unhealthy';
       
-      const phoneTest = await this.validatePhone('+14155552671', { skipExternal: true });
+      const phoneTest = await this.validatePhone('+14155552671');
       checks.phone = phoneTest ? 'healthy' : 'unhealthy';
       
       const addressTest = await this.validateAddress('123 Main St, San Francisco, CA 94105', { skipExternal: true });
       checks.address = addressTest ? 'healthy' : 'unhealthy';
       
-      // Check external service circuit breakers
-      checks.external.zeroBounce = this.zeroBounce.getCircuitBreakerState().state;
-      checks.external.openCage = this.openCage.getCircuitBreakerState().state;
-      
+      // Check external services
+      if (this.openCage && this.openCage.healthCheck) {
+        checks.external.openCage = await this.openCage.healthCheck() ? 'healthy' : 'unhealthy';
+      }
     } catch (error) {
       this.logger.error('Health check failed', error);
     }
@@ -495,5 +460,5 @@ class ValidationService {
 // Create singleton instance
 const validationService = new ValidationService();
 
-// Export both the instance and the class
-export { validationService as default, ValidationService };
+// Export default
+export default validationService;

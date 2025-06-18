@@ -869,3 +869,4 @@ setInterval(() => {
 
 // Export the class and instance
 export { emailValidationService, EmailValidationService };
+export default emailValidationService;
