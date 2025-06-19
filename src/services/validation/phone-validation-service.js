@@ -236,6 +236,7 @@ class PhoneValidationService {
       });
       
       // Don't throw - return null to fall back to libphonenumber-js
+      // When this happens for FIXED_LINE_OR_MOBILE types, we'll default to mobile
       return null;
     }
   }
@@ -561,19 +562,23 @@ class PhoneValidationService {
       }
       
       // Step 3: Check if we need external validation with Numverify
+      // CRITICAL FIX: Always use Numverify for FIXED_LINE_OR_MOBILE types
+      const phoneType = phoneNumber?.getType();
       const needsExternalValidation = useExternalApi && (
         !phoneNumber || 
         !phoneNumber.isValid() || 
         (confidence && confidence.score < confidenceThreshold) ||
-        (phoneNumber && phoneNumber.getType() === 'UNKNOWN')
+        phoneType === 'UNKNOWN' ||
+        phoneType === 'FIXED_LINE_OR_MOBILE' // This is the key fix!
       );
       
       if (needsExternalValidation) {
-        this.logger.info('Using external API due to low confidence or validation failure', {
+        this.logger.info('Using external API for validation', {
           hasPhoneNumber: !!phoneNumber,
           isValid: phoneNumber?.isValid(),
           confidenceScore: confidence?.score,
-          phoneType: phoneNumber?.getType()
+          phoneType: phoneType,
+          reason: phoneType === 'FIXED_LINE_OR_MOBILE' ? 'ambiguous_type' : 'low_confidence'
         });
         
         // Call Numverify API
@@ -606,6 +611,14 @@ class PhoneValidationService {
             validationMethod: 'external_api',
             externalApiUsed: true
           }, clientId);
+        } else if (phoneType === 'FIXED_LINE_OR_MOBILE') {
+          // Numverify couldn't determine the type or errored out
+          // Log this scenario for monitoring
+          this.logger.info('Numverify could not determine phone type, defaulting to mobile for FIXED_LINE_OR_MOBILE', {
+            phone: cleanedPhone.substring(0, 6) + '***',
+            country: successfulCountry,
+            numverifyFailed: !externalResult
+          });
         }
       }
       
@@ -624,6 +637,7 @@ class PhoneValidationService {
             countryCode: validPrediction.format.e164.match(/^\+(\d+)/)?.[1],
             country: validPrediction.country,
             type: validPrediction.phoneType,
+            // Default to mobile for FIXED_LINE_OR_MOBILE when Numverify unavailable
             isMobile: validPrediction.phoneType === 'MOBILE' || validPrediction.phoneType === 'FIXED_LINE_OR_MOBILE',
             isFixedLine: validPrediction.phoneType === 'FIXED_LINE',
             isFixedLineOrMobile: validPrediction.phoneType === 'FIXED_LINE_OR_MOBILE',
@@ -666,6 +680,7 @@ class PhoneValidationService {
         countryCode: phoneNumber.countryCallingCode,
         country: phoneNumber.country || successfulCountry,
         type: phoneNumber.getType() || 'UNKNOWN',
+        // Default to mobile for FIXED_LINE_OR_MOBILE when Numverify is unavailable or fails
         isMobile: phoneNumber.getType() === 'MOBILE' || phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE',
         isFixedLine: phoneNumber.getType() === 'FIXED_LINE',
         isFixedLineOrMobile: phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE',
@@ -675,7 +690,8 @@ class PhoneValidationService {
         validationMethod,
         hintCountryUsed: providedCountry === successfulCountry,
         externalApiUsed: false,
-        isFictional: false
+        isFictional: false,
+        numverifyAttempted: needsExternalValidation // Track if we tried Numverify
       };
       
       // Check if fictional number
@@ -921,7 +937,7 @@ class PhoneValidationService {
       error: validationData.error || null,
       warning: validationData.warning || null,
       
-      // Phone type
+      // Phone type - FIXED: No defaulting for ambiguous types
       type: validationData.type || 'UNKNOWN',
       
       // Location info
@@ -948,18 +964,28 @@ class PhoneValidationService {
       externalApiUsed: validationData.externalApiUsed || false,
       isFictional: validationData.isFictional || false,
       
-      // Unmessy fields
+      // Unmessy fields - Default is_mobile for ambiguous types
       um_phone: validationData.international || validationData.e164 || originalPhone,
       um_phone_status: wasChanged ? 'Changed' : 'Unchanged',
       um_phone_format: formatValid ? 'Valid' : 'Invalid',
       um_phone_country_code: countryCode || '',
       um_phone_country: countryName,
-      um_phone_is_mobile: validationData.isMobile || false,
+      um_phone_is_mobile: validationData.isMobile === true || 
+                          (validationData.type === 'FIXED_LINE_OR_MOBILE' && validationData.numverifyAttempted),
       
       // Debug info
       detectedCountry: validationData.country,
       parseError: validationData.parseError || null
     };
+    
+    // Add line type flags if available
+    if (validationData.isFixedLineOrMobile) {
+      result.isFixedLineOrMobile = true;
+      result.numverifyUnavailable = validationData.numverifyAttempted && !validationData.externalApiUsed;
+      if (result.numverifyUnavailable) {
+        result.note = 'Phone type is ambiguous. Defaulted to mobile as external verification was unavailable.';
+      }
+    }
     
     // Add additional details if available
     if (validationData.predictions) {
