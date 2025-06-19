@@ -147,7 +147,7 @@ class NameValidationService {
     }
   }
   
-  // Basic name format validation
+  // Basic name format validation - UPDATED TO INCLUDE COMMA
   isValidNameFormat(name) {
     if (typeof name !== 'string') return false;
     
@@ -155,8 +155,8 @@ class NameValidationService {
     if (trimmedName.length === 0) return false;
     if (trimmedName.length < 2) return false;
     
-    // Allow letters, spaces, hyphens, apostrophes, periods
-    const validNameRegex = /^[\p{L}\p{M}'\-\s.]+$/u;
+    // Allow letters, spaces, hyphens, apostrophes, periods, and COMMAS
+    const validNameRegex = /^[\p{L}\p{M}'\-\s.,]+$/u;
     return validNameRegex.test(trimmedName);
   }
   
