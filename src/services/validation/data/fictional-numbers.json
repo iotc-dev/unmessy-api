@@ -1,0 +1,109 @@
+{
+  "US": {
+    "ranges": [
+      {
+        "pattern": "^\\+1[2-9]\\d{2}555(?:01[0-9]{2})$",
+        "description": "US 555-01XX fictional numbers",
+        "example": "+12025550123"
+      }
+    ]
+  },
+  "CA": {
+    "ranges": [
+      {
+        "pattern": "^\\+1[2-9]\\d{2}555(?:01[0-9]{2})$",
+        "description": "Canada uses US 555 convention",
+        "example": "+14165550123"
+      }
+    ]
+  },
+  "GB": {
+    "ranges": [
+      {
+        "pattern": "^\\+441632960[0-9]{3}$",
+        "description": "UK Ofcom fictional geographic",
+        "example": "+441632960123"
+      },
+      {
+        "pattern": "^\\+447700900[0-9]{3}$",
+        "description": "UK Ofcom fictional mobile",
+        "example": "+447700900123"
+      },
+      {
+        "pattern": "^\\+442079460[0-9]{3}$",
+        "description": "UK London fictional",
+        "example": "+442079460123"
+      }
+    ]
+  },
+  "AU": {
+    "ranges": [
+      {
+        "pattern": "^\\+61(?:2|3|7|8)5550[0-9]{4}$",
+        "description": "Australian fictional geographic",
+        "example": "+61255501234"
+      },
+      {
+        "pattern": "^\\+614[0-9]{2}555[0-9]{3}$",
+        "description": "Australian fictional mobile",
+        "example": "+61412555123"
+      }
+    ]
+  },
+  "DE": {
+    "ranges": [
+      {
+        "pattern": "^\\+493023125[0-9]{2,4}$",
+        "description": "German Berlin fictional",
+        "example": "+493023125000"
+      },
+      {
+        "pattern": "^\\+4915228817386$",
+        "description": "German mobile fictional",
+        "example": "+4915228817386"
+      }
+    ]
+  },
+  "FR": {
+    "ranges": [
+      {
+        "pattern": "^\\+33199000[0-9]{3}$",
+        "description": "French Paris fictional",
+        "example": "+33199000123"
+      },
+      {
+        "pattern": "^\\+33699000[0-9]{3}$",
+        "description": "French mobile fictional",
+        "example": "+33699000123"
+      }
+    ]
+  },
+  "NZ": {
+    "ranges": [
+      {
+        "pattern": "^\\+6495550[0-9]{4}$",
+        "description": "New Zealand Auckland fictional",
+        "example": "+6495550123"
+      },
+      {
+        "pattern": "^\\+6421555[0-9]{4}$",
+        "description": "New Zealand mobile fictional",
+        "example": "+64215551234"
+      }
+    ]
+  },
+  "IE": {
+    "ranges": [
+      {
+        "pattern": "^\\+3532091[0-9]{5}$",
+        "description": "Irish Dublin fictional",
+        "example": "+35320912345"
+      },
+      {
+        "pattern": "^\\+353860123456$",
+        "description": "Irish mobile fictional",
+        "example": "+353860123456"
+      }
+    ]
+  }
+}

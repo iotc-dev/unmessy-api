@@ -11,6 +11,8 @@ import {
   ParseError 
 } from 'libphonenumber-js';
 import countryMappings from './data/country-mappings.json' assert { type: 'json' };
+import fictionalNumbers from './data/fictional-numbers.json' assert { type: 'json' };
+import numverifyService from '../external/numverify.js';
 
 const logger = createServiceLogger('phone-validation-service');
 
@@ -23,6 +25,7 @@ class PhoneValidationService {
     this.initializeCountryMappings();
     this.initializeTerritoryMappings();
     this.initializeCallingCodeCache();
+    this.initializeFictionalNumbers();
   }
   
   // Initialize country mappings from JSON
@@ -100,6 +103,32 @@ class PhoneValidationService {
     });
   }
   
+  // Initialize fictional number patterns
+  initializeFictionalNumbers() {
+    this.fictionalPatterns = new Map();
+    
+    Object.entries(fictionalNumbers).forEach(([country, config]) => {
+      const patterns = config.ranges.map(range => ({
+        regex: new RegExp(range.pattern),
+        description: range.description,
+        example: range.example
+      }));
+      this.fictionalPatterns.set(country, patterns);
+    });
+    
+    this.logger.info('Fictional number patterns loaded', {
+      countries: this.fictionalPatterns.size
+    });
+  }
+  
+  // Check if number is fictional
+  isFictionalNumber(e164, country) {
+    const patterns = this.fictionalPatterns.get(country);
+    if (!patterns) return false;
+    
+    return patterns.some(pattern => pattern.regex.test(e164));
+  }
+  
   // Normalize country input for matching
   normalizeCountryInput(input) {
     if (!input) return '';
@@ -167,26 +196,48 @@ class PhoneValidationService {
     return this.callingCodeToCountries.get(callingCode) || [];
   }
   
-  // External API placeholder - Numverify
+  // Validate with Numverify external API
   async validateWithNumverify(phone, country = null) {
-    // TODO: Implement Numverify API call
-    // This is a placeholder for the external validation service
-    this.logger.info('Numverify validation placeholder called', { phone, country });
-    
-    // Placeholder response structure
-    return {
-      valid: false,
-      number: phone,
-      local_format: '',
-      international_format: '',
-      country_prefix: '',
-      country_code: '',
-      country_name: '',
-      location: '',
-      carrier: '',
-      line_type: 'unknown',
-      error: 'Numverify integration not implemented'
-    };
+    try {
+      // Check if Numverify is enabled
+      if (!numverifyService.isEnabled()) {
+        this.logger.debug('Numverify validation skipped - service not enabled');
+        return null;
+      }
+      
+      // Call Numverify API
+      const result = await numverifyService.validatePhone(phone, country);
+      
+      if (!result) {
+        return null;
+      }
+      
+      // Transform Numverify result to our format
+      return {
+        valid: result.valid,
+        number: result.number,
+        localFormat: result.localFormat,
+        internationalFormat: result.internationalFormat,
+        countryPrefix: result.countryPrefix,
+        countryCode: result.countryCode,
+        countryName: result.countryName,
+        location: result.location,
+        carrier: result.carrier,
+        lineType: result.lineType,
+        isMobile: result.isMobile,
+        isFixedLine: result.isFixedLine,
+        source: 'numverify'
+      };
+      
+    } catch (error) {
+      this.logger.error('Numverify validation failed', { 
+        error: error.message,
+        phone: phone.substring(0, 6) + '***'
+      });
+      
+      // Don't throw - return null to fall back to libphonenumber-js
+      return null;
+    }
   }
   
   // Calculate confidence for a specific country match
@@ -201,6 +252,13 @@ class PhoneValidationService {
     } else if (phoneNumber.isPossible()) {
       score += 20;
       factors.push('possible_format');
+    }
+    
+    // Check if fictional number - big penalty
+    const e164 = phoneNumber.format('E.164');
+    if (this.isFictionalNumber(e164, country)) {
+      score -= 50;  // Major penalty for fictional numbers
+      factors.push('fictional_number');
     }
     
     // BIG BONUS: Is this an actual country (not a territory)?
@@ -238,6 +296,9 @@ class PhoneValidationService {
       score += 5;
       factors.push('complete_number');
     }
+    
+    // Ensure score is not negative
+    score = Math.max(0, score);
     
     // Convert to level
     let level;
@@ -499,7 +560,7 @@ class PhoneValidationService {
         }
       }
       
-      // Step 3: Check if we need external validation
+      // Step 3: Check if we need external validation with Numverify
       const needsExternalValidation = useExternalApi && (
         !phoneNumber || 
         !phoneNumber.isValid() || 
@@ -515,26 +576,26 @@ class PhoneValidationService {
           phoneType: phoneNumber?.getType()
         });
         
-        // Call external API (Numverify)
+        // Call Numverify API
         const externalResult = await this.validateWithNumverify(
           cleanedPhone,
           successfulCountry || providedCountry
         );
         
         // If external API provides better results, use them
-        if (externalResult.valid) {
+        if (externalResult && externalResult.valid) {
           // Build result from external API data
           return this.buildValidationResult(phone, {
             valid: true,
             formatValid: true,
-            e164: externalResult.international_format,
-            international: externalResult.international_format,
-            national: externalResult.local_format,
-            countryCode: externalResult.country_prefix,
-            country: externalResult.country_code,
-            type: externalResult.line_type?.toUpperCase() || 'UNKNOWN',
-            isMobile: externalResult.line_type === 'mobile',
-            isFixedLine: externalResult.line_type === 'fixed_line',
+            e164: externalResult.internationalFormat,
+            international: externalResult.internationalFormat,
+            national: externalResult.localFormat,
+            countryCode: externalResult.countryPrefix,
+            country: externalResult.countryCode,
+            type: externalResult.lineType?.toUpperCase() || 'UNKNOWN',
+            isMobile: externalResult.isMobile,
+            isFixedLine: externalResult.isFixedLine,
             carrier: externalResult.carrier,
             location: externalResult.location,
             confidence: {
@@ -563,7 +624,7 @@ class PhoneValidationService {
             countryCode: validPrediction.format.e164.match(/^\+(\d+)/)?.[1],
             country: validPrediction.country,
             type: validPrediction.phoneType,
-            isMobile: validPrediction.phoneType === 'MOBILE',
+            isMobile: validPrediction.phoneType === 'MOBILE' || validPrediction.phoneType === 'FIXED_LINE_OR_MOBILE',
             isFixedLine: validPrediction.phoneType === 'FIXED_LINE',
             isFixedLineOrMobile: validPrediction.phoneType === 'FIXED_LINE_OR_MOBILE',
             isPossible: true,
@@ -605,7 +666,7 @@ class PhoneValidationService {
         countryCode: phoneNumber.countryCallingCode,
         country: phoneNumber.country || successfulCountry,
         type: phoneNumber.getType() || 'UNKNOWN',
-        isMobile: phoneNumber.getType() === 'MOBILE',
+        isMobile: phoneNumber.getType() === 'MOBILE' || phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE',
         isFixedLine: phoneNumber.getType() === 'FIXED_LINE',
         isFixedLineOrMobile: phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE',
         isPossible: phoneNumber.isPossible(),
@@ -613,14 +674,16 @@ class PhoneValidationService {
         confidence,
         validationMethod,
         hintCountryUsed: providedCountry === successfulCountry,
-        externalApiUsed: false
+        externalApiUsed: false,
+        isFictional: false
       };
       
-      // For FIXED_LINE_OR_MOBILE, default to mobile for common mobile countries
-      if (phoneDetails.isFixedLineOrMobile) {
-        const mobileFirstCountries = ['US', 'CA', 'PH', 'IN', 'BR', 'MX', 'AU'];
-        if (mobileFirstCountries.includes(phoneDetails.country)) {
-          phoneDetails.isMobile = true;
+      // Check if fictional number
+      if (this.isFictionalNumber(phoneDetails.e164, phoneDetails.country)) {
+        phoneDetails.isFictional = true;
+        phoneDetails.warning = 'This appears to be a fictional/test phone number';
+        if (confidence) {
+          confidence.factors.push('fictional_number');
         }
       }
       
@@ -629,8 +692,8 @@ class PhoneValidationService {
       
       const result = this.buildValidationResult(phone, phoneDetails, clientId);
       
-      // Save to cache if valid
-      if (useCache && result.valid) {
+      // Save to cache if valid and not fictional
+      if (useCache && result.valid && !phoneDetails.isFictional) {
         await this.savePhoneCache(phone, result, clientId);
       }
       
@@ -856,6 +919,7 @@ class PhoneValidationService {
       possible: validationData.isPossible !== false,
       formatValid: formatValid,
       error: validationData.error || null,
+      warning: validationData.warning || null,
       
       // Phone type
       type: validationData.type || 'UNKNOWN',
@@ -882,6 +946,7 @@ class PhoneValidationService {
       // Validation method
       validationMethod: validationData.validationMethod || 'unknown',
       externalApiUsed: validationData.externalApiUsed || false,
+      isFictional: validationData.isFictional || false,
       
       // Unmessy fields
       um_phone: validationData.international || validationData.e164 || originalPhone,
