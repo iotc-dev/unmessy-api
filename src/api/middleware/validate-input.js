@@ -95,7 +95,7 @@ export const schemas = {
           'string.empty': 'Phone number is required',
           'any.required': 'Phone number is required'
         }),
-      country: Joi.string().min(2).max(2)
+      country: Joi.string().max(50).optional()  // Allow up to 50 characters
     })
   },
   
