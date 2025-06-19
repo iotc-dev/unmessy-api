@@ -53,15 +53,124 @@ class PhoneValidationService {
         if (cleaned.startsWith('09')) {
           return 'PH';
         }
+        // New Zealand: 03, 04, 06, 07, 09 (10 digits)
+        if (cleaned.match(/^0[34679]/)) {
+          return 'NZ';
+        }
+        // South Africa: 10 digits starting with 0
+        if (cleaned.match(/^0[1-8]/)) {
+          return 'ZA';
+        }
       }
       // UK numbers: 11 digits starting with 0
       if (cleaned.length === 11) {
-        return 'GB';
+        // UK mobile: 07XXX XXXXXX
+        if (cleaned.startsWith('07')) {
+          return 'GB';
+        }
+        // UK landline patterns
+        if (cleaned.match(/^0[1-9]/)) {
+          return 'GB';
+        }
+      }
+      // Philippines landline: 8 digits (without area code)
+      if (cleaned.length === 8 && cleaned.match(/^[2-9]/)) {
+        return 'PH';
       }
     }
     
-    // US/Canada numbers (10 digits not starting with 0, or 11 digits starting with 1)
-    if ((cleaned.length === 10 && !cleaned.startsWith('0')) || 
+    // Singapore numbers: 8 digits starting with 6, 8, or 9
+    if (cleaned.length === 8 && cleaned.match(/^[689]/)) {
+      return 'SG';
+    }
+    
+    // Hong Kong numbers: 8 digits starting with 2, 3, 5, 6, 7, 8, 9
+    if (cleaned.length === 8 && cleaned.match(/^[235-9]/)) {
+      return 'HK';
+    }
+    
+    // India numbers: 10 digits not starting with 0 or 1
+    if (cleaned.length === 10 && cleaned.match(/^[2-9]/)) {
+      // Check if it could be Indian mobile (starting with 6-9)
+      if (cleaned.match(/^[6-9]/)) {
+        return 'IN';
+      }
+    }
+    
+    // Brazil numbers: 10-11 digits
+    if (cleaned.length === 10 && cleaned.match(/^[1-9]{2}/)) {
+      return 'BR';
+    }
+    if (cleaned.length === 11 && cleaned.match(/^[1-9]{2}9/)) {
+      // Brazilian mobile with 9 prefix
+      return 'BR';
+    }
+    
+    // Mexico numbers: 10 digits
+    if (cleaned.length === 10 && cleaned.match(/^[2-9]/)) {
+      // Could be Mexico, but also could be US - need more context
+      // Check for Mexican area codes patterns
+      if (cleaned.match(/^(33|55|81|656|664|998|222|229|244)/)) {
+        return 'MX';
+      }
+    }
+    
+    // Japan numbers: Various lengths (9-11 digits)
+    if (cleaned.length >= 9 && cleaned.length <= 11) {
+      // Japanese mobile: 070, 080, 090
+      if (cleaned.match(/^0[789]0/)) {
+        return 'JP';
+      }
+      // Tokyo landline: 03
+      if (cleaned.startsWith('03') && cleaned.length === 10) {
+        return 'JP';
+      }
+    }
+    
+    // German numbers: 11-12 digits starting with 0
+    if ((cleaned.length === 11 || cleaned.length === 12) && cleaned.startsWith('0')) {
+      // German mobile: 015, 016, 017
+      if (cleaned.match(/^01[567]/)) {
+        return 'DE';
+      }
+    }
+    
+    // French numbers: 10 digits starting with 0
+    if (cleaned.length === 10 && cleaned.startsWith('0')) {
+      // French mobile: 06, 07
+      if (cleaned.match(/^0[67]/)) {
+        return 'FR';
+      }
+      // French landline: 01-05, 09
+      if (cleaned.match(/^0[1-59]/)) {
+        return 'FR';
+      }
+    }
+    
+    // Italian numbers: 10 digits (mobiles) or 9-11 (landlines)
+    if (cleaned.startsWith('3') && cleaned.length === 10) {
+      return 'IT'; // Italian mobile
+    }
+    
+    // Spanish numbers: 9 digits
+    if (cleaned.length === 9) {
+      // Spanish mobile: 6XX or 7XX
+      if (cleaned.match(/^[67]/)) {
+        return 'ES';
+      }
+      // Spanish landline: 8XX or 9XX
+      if (cleaned.match(/^[89]/)) {
+        return 'ES';
+      }
+    }
+    
+    // Russian numbers: 11 digits starting with 7 or 8
+    if (cleaned.length === 11 && cleaned.match(/^[78]/)) {
+      return 'RU';
+    }
+    
+    // US/Canada numbers (10 digits not starting with 0 or 1, or 11 digits starting with 1)
+    if ((cleaned.length === 10 && !cleaned.startsWith('0') && !cleaned.startsWith('1')) || 
         (cleaned.length === 11 && cleaned.startsWith('1'))) {
       return 'US';
     }
@@ -241,12 +350,24 @@ class PhoneValidationService {
     cleaned = cleaned.replace(/[\s\-\(\)\.]/g, '');
     
     // Remove extension markers and everything after
-    cleaned = cleaned.replace(/(?:ext|x|extension).*$/i, '');
+    cleaned = cleaned.replace(/(?:ext|extension|x|ext\.|extn|extn\.|#)[\s\.\-:#]?[\d]+$/i, '');
     
-    // Handle common prefixes
+    // Handle various international prefixes
     if (cleaned.startsWith('00')) {
-      // International prefix used in some countries
+      // International prefix used in many countries
       cleaned = '+' + cleaned.substring(2);
+    } else if (cleaned.startsWith('011')) {
+      // US international prefix
+      cleaned = '+' + cleaned.substring(3);
+    } else if (cleaned.startsWith('0011')) {
+      // Australian international prefix
+      cleaned = '+' + cleaned.substring(4);
+    } else if (cleaned.startsWith('010')) {
+      // Japanese international prefix
+      cleaned = '+' + cleaned.substring(3);
+    } else if (cleaned.startsWith('009')) {
+      // Nigerian international prefix
+      cleaned = '+' + cleaned.substring(3);
     }
     
     // Handle letters in phone numbers (like 1-800-FLOWERS)
@@ -264,6 +385,9 @@ class PhoneValidationService {
       return letterMap[match.toUpperCase()] || match;
     });
     
+    // Remove any remaining non-digit characters except +
+    cleaned = cleaned.replace(/[^\d+]/g, '');
+    
     return cleaned;
   }
   
@@ -277,6 +401,7 @@ class PhoneValidationService {
       'DE': 'Germany',
       'FR': 'France',
       'PH': 'Philippines',
+      'PG': 'Papua New Guinea', // This was missing!
       'IN': 'India',
       'JP': 'Japan',
       'CN': 'China',
@@ -361,6 +486,10 @@ class PhoneValidationService {
     const formattedPhone = validationData.international || validationData.e164 || this.cleanPhoneNumber(originalPhone);
     const wasChanged = originalPhone !== formattedPhone;
     
+    // Get the country name properly
+    const countryCode = validationData.country || null;
+    const countryName = countryCode ? this.getCountryName(countryCode) : '';
+    
     const result = {
       originalPhone,
       currentPhone: validationData.e164 || this.cleanPhoneNumber(originalPhone),
@@ -373,7 +502,7 @@ class PhoneValidationService {
       type: validationData.type || 'UNKNOWN',
       
       // Location info
-      location: validationData.countryName || this.getCountryName(validationData.country),
+      location: validationData.countryName || countryName,
       carrier: '', // Would need external service for carrier lookup
       
       // Phone formats
@@ -383,22 +512,22 @@ class PhoneValidationService {
       uri: validationData.uri || null,
       
       // Country details
-      countryCode: validationData.country || null,
+      countryCode: countryCode,
       countryCallingCode: validationData.countryCode || null,
       
       // Additional details
       confidence: isValid ? 'high' : 'low',
       
-      // Unmessy fields
+      // Unmessy fields - ensure country name not code
       um_phone: validationData.international || validationData.e164 || originalPhone,
       um_phone_status: wasChanged ? 'Changed' : 'Unchanged',
       um_phone_format: formatValid ? 'Valid' : 'Invalid',
-      um_phone_country_code: validationData.country || '',
-      um_phone_country: validationData.countryName || this.getCountryName(validationData.country) || '',
+      um_phone_country_code: countryCode || '',
+      um_phone_country: countryName, // This should be the NAME not CODE
       um_phone_is_mobile: validationData.isMobile || false,
       
       // Debug info
-      detectedCountry: validationData.country,
+      detectedCountry: countryCode,
       parseError: validationData.parseError || null
     };
     
