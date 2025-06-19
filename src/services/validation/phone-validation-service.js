@@ -37,21 +37,33 @@ class PhoneValidationService {
       }
     }
     
-    // For US/Canada numbers without country code (10 or 11 digits)
-    if (cleaned.length === 10 || (cleaned.length === 11 && cleaned.startsWith('1'))) {
-      return 'US'; // Default to US (same format as Canada)
-    }
-    
-    // For Philippines numbers (10 or 11 digits starting with 0)
-    if ((cleaned.length === 10 || cleaned.length === 11) && cleaned.startsWith('0')) {
-      // Check if it matches Philippines mobile pattern
-      if (cleaned.startsWith('09')) {
-        return 'PH';
+    // Handle specific patterns before defaulting to US
+    if (cleaned.startsWith('0')) {
+      // Australian numbers: 10 digits starting with 0
+      if (cleaned.length === 10) {
+        // Australian mobile: 04XX XXX XXX
+        if (cleaned.startsWith('04')) {
+          return 'AU';
+        }
+        // Australian landline area codes: 02, 03, 07, 08
+        if (cleaned.match(/^0[2378]/)) {
+          return 'AU';
+        }
+        // Philippines mobile: 09XX XXX XXXX
+        if (cleaned.startsWith('09')) {
+          return 'PH';
+        }
       }
-      // UK also has 11 digits starting with 0
+      // UK numbers: 11 digits starting with 0
       if (cleaned.length === 11) {
         return 'GB';
       }
+    }
+    
+    // US/Canada numbers (10 digits not starting with 0, or 11 digits starting with 1)
+    if ((cleaned.length === 10 && !cleaned.startsWith('0')) || 
+        (cleaned.length === 11 && cleaned.startsWith('1'))) {
+      return 'US';
     }
     
     // Default to configured default country
