@@ -182,14 +182,22 @@ class PhoneValidationService {
   // Validate phone number using libphonenumber-js
   async validatePhoneNumber(phone, options = {}) {
     const {
-      country = null, // Allow null to trigger auto-detection
+      country = null, // Allow explicit country to be passed
+      countryHint = null, // Alternative way to specify country
+      strictCountry = false, // If true, only use provided country
+      fallbackCountries = ['AU', 'GB', 'PH', 'CA', 'NZ', 'IN', 'US'], // Countries to try
+      tryAllCountries = false, // If true, try parsing with many countries
       clientId = null,
       useCache = true
     } = options;
     
+    // Use provided country first
+    const providedCountry = country || countryHint;
+    
     this.logger.debug('Starting phone validation', {
       phone,
-      country,
+      providedCountry,
+      strictCountry,
       clientId
     });
     
@@ -214,51 +222,171 @@ class PhoneValidationService {
       }
     }
     
-    // Auto-detect country if not provided
-    const detectedCountry = country || this.detectCountryFromNumber(cleanedPhone);
+    // Determine country: provided > detected > default
+    let detectedCountry = providedCountry;
+    if (!detectedCountry && !strictCountry) {
+      detectedCountry = this.detectCountryFromNumber(cleanedPhone);
+      
+      // Log potential mismatches for debugging
+      if (detectedCountry === 'US' && cleanedPhone.startsWith('0')) {
+        this.logger.warn('Potential country mismatch: Non-US format number defaulted to US', { 
+          cleanedPhone,
+          detectedCountry 
+        });
+      }
+    }
     
     this.logger.debug('Country detection', {
-      provided: country,
+      provided: providedCountry,
       detected: detectedCountry,
       phone: cleanedPhone
     });
     
+    // Try parsing with multiple strategies
+    let phoneNumber = null;
+    let successfulCountry = null;
+    let parseAttempts = [];
+    
     try {
-      // Try parsing phone number
-      let phoneNumber;
-      
-      // First, try parsing with detected/provided country
-      try {
-        phoneNumber = parsePhoneNumber(cleanedPhone, detectedCountry);
-      } catch (parseError) {
-        // If that fails and number has international format, try without country
-        if (cleanedPhone.startsWith('+')) {
-          try {
-            phoneNumber = parsePhoneNumberFromString(cleanedPhone);
-          } catch (e) {
-            throw parseError; // Throw original error
+      // Strategy 1: Try with provided country first (if specified)
+      if (providedCountry) {
+        try {
+          phoneNumber = parsePhoneNumber(cleanedPhone, providedCountry);
+          if (phoneNumber && phoneNumber.isValid()) {
+            successfulCountry = providedCountry;
+            parseAttempts.push({ country: providedCountry, success: true });
+          } else {
+            parseAttempts.push({ country: providedCountry, success: false, reason: 'Invalid' });
+            
+            // If strict mode, don't try other countries
+            if (strictCountry) {
+              return this.buildValidationResult(phone, {
+                valid: false,
+                error: `Invalid ${this.getCountryName(providedCountry)} phone number`,
+                formatValid: false,
+                country: providedCountry,
+                parseAttempts
+              }, clientId);
+            }
           }
-        } else {
-          // Try adding country code for local numbers using library function
+        } catch (e) {
+          parseAttempts.push({ country: providedCountry, success: false, reason: e.message });
+          
+          if (strictCountry) {
+            return this.buildValidationResult(phone, {
+              valid: false,
+              error: `Not a valid ${this.getCountryName(providedCountry)} phone number format`,
+              formatValid: false,
+              country: providedCountry,
+              parseAttempts
+            }, clientId);
+          }
+          
+          this.logger.debug('Failed to parse with provided country', { 
+            country: providedCountry, 
+            error: e.message 
+          });
+        }
+      }
+      
+      // Strategy 2: Try with detected country (if different from provided)
+      if (!phoneNumber && detectedCountry && detectedCountry !== providedCountry) {
+        try {
+          phoneNumber = parsePhoneNumber(cleanedPhone, detectedCountry);
+          if (phoneNumber && phoneNumber.isValid()) {
+            successfulCountry = detectedCountry;
+            parseAttempts.push({ country: detectedCountry, success: true });
+            
+            // Warn if provided country was wrong
+            if (providedCountry) {
+              this.logger.warn('Provided country was incorrect', {
+                provided: providedCountry,
+                actual: detectedCountry,
+                phone: cleanedPhone
+              });
+            }
+          } else {
+            parseAttempts.push({ country: detectedCountry, success: false, reason: 'Invalid' });
+          }
+        } catch (e) {
+          parseAttempts.push({ country: detectedCountry, success: false, reason: e.message });
+        }
+      }
+      
+      // Strategy 3: If number has + prefix, try without country
+      if (!phoneNumber && cleanedPhone.startsWith('+')) {
+        try {
+          phoneNumber = parsePhoneNumberFromString(cleanedPhone);
+          if (phoneNumber && phoneNumber.isValid()) {
+            successfulCountry = phoneNumber.country;
+            parseAttempts.push({ country: 'AUTO', success: true, detected: successfulCountry });
+            
+            // Warn if provided country was wrong
+            if (providedCountry && providedCountry !== successfulCountry) {
+              this.logger.warn('Provided country was incorrect', {
+                provided: providedCountry,
+                actual: successfulCountry,
+                phone: cleanedPhone
+              });
+            }
+          }
+        } catch (e) {
+          parseAttempts.push({ country: 'AUTO', success: false, reason: e.message });
+        }
+      }
+      
+      // Strategy 4: Try fallback countries
+      if (!phoneNumber && !cleanedPhone.startsWith('+')) {
+        const countriesToTry = tryAllCountries ? 
+          getCountries() : // All countries from libphonenumber-js
+          fallbackCountries;
+          
+        for (const fallbackCountry of countriesToTry) {
           try {
-            const callingCode = getCountryCallingCode(detectedCountry);
+            // Skip if we already tried this country
+            if (parseAttempts.some(a => a.country === fallbackCountry)) continue;
+            
+            // For local numbers, add country code
+            const callingCode = getCountryCallingCode(fallbackCountry);
             const withCountryCode = '+' + callingCode + cleanedPhone.replace(/^0+/, '');
+            
             phoneNumber = parsePhoneNumberFromString(withCountryCode);
+            if (phoneNumber && phoneNumber.isValid()) {
+              successfulCountry = fallbackCountry;
+              parseAttempts.push({ country: fallbackCountry, success: true });
+              
+              // Warn if provided country was wrong
+              if (providedCountry && providedCountry !== successfulCountry) {
+                this.logger.warn('Provided country was incorrect', {
+                  provided: providedCountry,
+                  actual: successfulCountry,
+                  phone: cleanedPhone
+                });
+              }
+              
+              this.logger.debug('Successfully parsed with fallback country', { 
+                country: fallbackCountry 
+              });
+              break;
+            } else {
+              parseAttempts.push({ country: fallbackCountry, success: false, reason: 'Invalid' });
+            }
           } catch (e) {
-            throw parseError; // Throw original error
+            parseAttempts.push({ country: fallbackCountry, success: false, reason: e.message });
           }
         }
       }
       
-      // Validate the parsed number
-      const isValid = phoneNumber && phoneNumber.isValid();
-      
-      if (!isValid) {
+      // If still no valid parse, return error with attempts info
+      if (!phoneNumber || !phoneNumber.isValid()) {
+        const attemptedCountries = parseAttempts.map(a => a.country).join(', ');
         return this.buildValidationResult(phone, {
           valid: false,
-          error: 'Invalid phone number format',
+          error: `Invalid phone number format. Tried countries: ${attemptedCountries}`,
           formatValid: false,
-          country: detectedCountry
+          country: providedCountry || detectedCountry,
+          parseAttempts,
+          suggestedCountry: detectedCountry !== providedCountry ? detectedCountry : null
         }, clientId);
       }
       
@@ -270,19 +398,20 @@ class PhoneValidationService {
         international: phoneNumber.format('INTERNATIONAL'),
         national: phoneNumber.format('NATIONAL'),
         countryCode: phoneNumber.countryCallingCode,
-        country: phoneNumber.country || detectedCountry,
+        country: phoneNumber.country || successfulCountry,
         type: phoneNumber.getType() || 'UNKNOWN',
         isMobile: phoneNumber.getType() === 'MOBILE',
         isFixedLine: phoneNumber.getType() === 'FIXED_LINE',
         isFixedLineOrMobile: phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE',
         isPossible: phoneNumber.isPossible(),
-        uri: phoneNumber.getURI()
+        uri: phoneNumber.getURI(),
+        parseAttempts,
+        providedCountryWasWrong: providedCountry && providedCountry !== successfulCountry
       };
       
       // For FIXED_LINE_OR_MOBILE, default to mobile for common mobile countries
       if (phoneDetails.isFixedLineOrMobile) {
-        // Common mobile-first countries
-        const mobileFirstCountries = ['US', 'CA', 'PH', 'IN', 'BR', 'MX'];
+        const mobileFirstCountries = ['US', 'CA', 'PH', 'IN', 'BR', 'MX', 'AU'];
         if (mobileFirstCountries.includes(phoneDetails.country)) {
           phoneDetails.isMobile = true;
         }
@@ -293,6 +422,12 @@ class PhoneValidationService {
       
       const result = this.buildValidationResult(phone, phoneDetails, clientId);
       
+      // Add warning if country was corrected
+      if (phoneDetails.providedCountryWasWrong) {
+        result.warning = `Phone number is from ${phoneDetails.countryName}, not ${this.getCountryName(providedCountry)}`;
+        result.correctedCountry = phoneDetails.country;
+      }
+      
       // Save to cache if valid
       if (useCache && result.valid) {
         await this.savePhoneCache(phone, result, clientId);
@@ -301,7 +436,7 @@ class PhoneValidationService {
       return result;
       
     } catch (error) {
-      this.logger.debug('Phone parsing failed', { phone, error: error.message });
+      this.logger.error('Phone parsing failed', { phone, error: error.message });
       
       // Handle specific parse errors
       if (error instanceof ParseError) {
@@ -327,7 +462,8 @@ class PhoneValidationService {
           error: errorMessage,
           formatValid: false,
           parseError: error.message,
-          country: detectedCountry
+          country: providedCountry || detectedCountry,
+          parseAttempts
         }, clientId);
       }
       
@@ -336,7 +472,8 @@ class PhoneValidationService {
         valid: false,
         error: 'Failed to validate phone number',
         formatValid: false,
-        country: detectedCountry
+        country: providedCountry || detectedCountry,
+        parseAttempts
       }, clientId);
     }
   }
