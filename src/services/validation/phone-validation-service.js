@@ -33,6 +33,15 @@ class PhoneValidationService {
     let confidence = 0;
     let factors = [];
     
+    // If phoneNumber is null (validation failed), return very low confidence
+    if (!phoneNumber) {
+      return {
+        score: 0,
+        level: 'none',
+        factors: ['validation_failed']
+      };
+    }
+    
     // Factor 1: How the number was parsed (40 points max)
     if (detectedMethod === 'auto-detect-international' && originalHasPlus) {
       confidence += 40;
@@ -52,28 +61,40 @@ class PhoneValidationService {
     }
     
     // Factor 2: Number validity and type (30 points max)
-    if (phoneNumber.isValid() && phoneNumber.isPossible()) {
-      confidence += 30;
-      factors.push('valid_possible');
-    } else if (phoneNumber.isValid()) {
-      confidence += 20;
-      factors.push('valid_only');
-    } else if (phoneNumber.isPossible()) {
-      confidence += 10;
-      factors.push('possible_only');
+    // Check if phoneNumber exists before calling methods
+    try {
+      if (phoneNumber.isValid() && phoneNumber.isPossible()) {
+        confidence += 30;
+        factors.push('valid_possible');
+      } else if (phoneNumber.isValid()) {
+        confidence += 20;
+        factors.push('valid_only');
+      } else if (phoneNumber.isPossible()) {
+        confidence += 10;
+        factors.push('possible_only');
+      }
+    } catch (e) {
+      // If methods fail, add minimal points
+      confidence += 5;
+      factors.push('validation_error');
     }
     
     // Factor 3: Phone type certainty (20 points max)
-    const phoneType = phoneNumber.getType();
-    if (phoneType === 'MOBILE' || phoneType === 'FIXED_LINE') {
-      confidence += 20;
-      factors.push('definite_type');
-    } else if (phoneType === 'FIXED_LINE_OR_MOBILE') {
-      confidence += 10;
-      factors.push('ambiguous_type');
-    } else {
-      confidence += 5;
-      factors.push('unknown_type');
+    try {
+      const phoneType = phoneNumber.getType();
+      if (phoneType === 'MOBILE' || phoneType === 'FIXED_LINE') {
+        confidence += 20;
+        factors.push('definite_type');
+      } else if (phoneType === 'FIXED_LINE_OR_MOBILE') {
+        confidence += 10;
+        factors.push('ambiguous_type');
+      } else {
+        confidence += 5;
+        factors.push('unknown_type');
+      }
+    } catch (e) {
+      confidence += 0;
+      factors.push('type_detection_failed');
     }
     
     // Factor 4: Parse attempt clarity (10 points max)
@@ -115,8 +136,10 @@ class PhoneValidationService {
       level = 'medium';
     } else if (confidence >= 30) {
       level = 'low';
-    } else {
+    } else if (confidence > 0) {
       level = 'very_low';
+    } else {
+      level = 'none';
     }
     
     return {
