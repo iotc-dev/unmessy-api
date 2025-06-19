@@ -640,7 +640,10 @@ class PhoneValidationService {
             numverifyValid: externalResult?.valid
           });
         }
-      } else if (phoneType === 'FIXED_LINE_OR_MOBILE') {
+      }
+      
+      // Step 4: Return validation result
+      if (!phoneNumber || !phoneNumber.isValid()) { else if (phoneType === 'FIXED_LINE_OR_MOBILE') {
           // Numverify couldn't determine the type or errored out
           // Log this scenario for monitoring
           this.logger.info('Numverify could not determine phone type, defaulting to mobile for FIXED_LINE_OR_MOBILE', {
