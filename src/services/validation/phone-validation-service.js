@@ -199,13 +199,19 @@ class PhoneValidationService {
   // Validate with Numverify external API
   async validateWithNumverify(phone, country = null) {
     try {
-      // Check if Numverify is enabled
-      if (!numverifyService.isEnabled()) {
-        this.logger.debug('Numverify validation skipped - service not enabled');
+      // Check if Numverify is enabled using the actual env variables
+      const numverifyEnabled = process.env.NUMVERIFY_ENABLED === 'true';
+      const numverifyApiKey = process.env.NUMVERIFY_API_KEY;
+      
+      if (!numverifyEnabled || !numverifyApiKey) {
+        this.logger.debug('Numverify validation skipped', {
+          enabled: numverifyEnabled,
+          hasApiKey: !!numverifyApiKey
+        });
         return null;
       }
       
-      // Call Numverify API
+      // Import numverify service (it checks its own env variables)
       const result = await numverifyService.validatePhone(phone, country);
       
       if (!result) {
@@ -562,23 +568,33 @@ class PhoneValidationService {
       }
       
       // Step 3: Check if we need external validation with Numverify
-      // CRITICAL FIX: Always use Numverify for FIXED_LINE_OR_MOBILE types
+      // Use Numverify for ambiguous types (FIXED_LINE_OR_MOBILE) and UNKNOWN types
       const phoneType = phoneNumber?.getType();
-      const needsExternalValidation = useExternalApi && (
-        !phoneNumber || 
-        !phoneNumber.isValid() || 
-        (confidence && confidence.score < confidenceThreshold) ||
-        phoneType === 'UNKNOWN' ||
-        phoneType === 'FIXED_LINE_OR_MOBILE' // This is the key fix!
-      );
+      const isAmbiguousType = phoneType === 'FIXED_LINE_OR_MOBILE';
+      const isUnknownType = phoneType === 'UNKNOWN';
+      
+      // Use Numverify if:
+      // 1. External API is enabled
+      // 2. We have a valid phone number OR unknown type
+      // 3. The type is FIXED_LINE_OR_MOBILE OR UNKNOWN
+      // 4. For ambiguous types: always check; for others: check if confidence is low
+      const needsExternalValidation = useExternalApi && 
+        phoneNumber && 
+        (isAmbiguousType || isUnknownType || 
+         (confidence && confidence.score < confidenceThreshold));
+      
+      let numverifyUsed = false;
+      let numverifyResult = null;
       
       if (needsExternalValidation) {
-        this.logger.info('Using external API for validation', {
-          hasPhoneNumber: !!phoneNumber,
-          isValid: phoneNumber?.isValid(),
-          confidenceScore: confidence?.score,
+        this.logger.info('Using Numverify for phone validation', {
+          phone: cleanedPhone.substring(0, 6) + '***',
+          country: successfulCountry,
           phoneType: phoneType,
-          reason: phoneType === 'FIXED_LINE_OR_MOBILE' ? 'ambiguous_type' : 'low_confidence'
+          confidence: confidence?.score,
+          reason: isAmbiguousType ? 'ambiguous_type' : 
+                  isUnknownType ? 'unknown_type' : 
+                  'low_confidence'
         });
         
         // Call Numverify API
@@ -587,18 +603,22 @@ class PhoneValidationService {
           successfulCountry || providedCountry
         );
         
-        // If external API provides better results, use them
-        if (externalResult && externalResult.valid) {
+        numverifyUsed = true;
+        numverifyResult = externalResult;
+        
+        // If external API provides a definitive result, use it
+        if (externalResult && externalResult.valid && 
+            (externalResult.lineType === 'mobile' || externalResult.lineType === 'fixed_line')) {
           // Build result from external API data
           return this.buildValidationResult(phone, {
             valid: true,
             formatValid: true,
-            e164: externalResult.internationalFormat,
-            international: externalResult.internationalFormat,
-            national: externalResult.localFormat,
-            countryCode: externalResult.countryPrefix,
-            country: externalResult.countryCode,
-            type: externalResult.lineType?.toUpperCase() || 'UNKNOWN',
+            e164: phoneNumber.format('E.164'), // Use libphonenumber format
+            international: phoneNumber.format('INTERNATIONAL'),
+            national: phoneNumber.format('NATIONAL'),
+            countryCode: phoneNumber.countryCallingCode,
+            country: phoneNumber.country || successfulCountry,
+            type: externalResult.lineType === 'mobile' ? 'MOBILE' : 'FIXED_LINE',
             isMobile: externalResult.isMobile,
             isFixedLine: externalResult.isFixedLine,
             carrier: externalResult.carrier,
@@ -606,12 +626,21 @@ class PhoneValidationService {
             confidence: {
               score: 95,
               level: 'very_high',
-              factors: ['external_api_verified', 'numverify']
+              factors: ['external_api_verified', 'numverify', 'definitive_type']
             },
-            validationMethod: 'external_api',
-            externalApiUsed: true
+            validationMethod: 'external_api_verification',
+            externalApiUsed: true,
+            numverifyUsed: true
           }, clientId);
-        } else if (phoneType === 'FIXED_LINE_OR_MOBILE') {
+        } else {
+          // Numverify couldn't determine the type definitively
+          this.logger.info('Numverify could not determine definitive type, defaulting to mobile for ambiguous types', {
+            phone: cleanedPhone.substring(0, 6) + '***',
+            numverifyLineType: externalResult?.lineType,
+            numverifyValid: externalResult?.valid
+          });
+        }
+      } else if (phoneType === 'FIXED_LINE_OR_MOBILE') {
           // Numverify couldn't determine the type or errored out
           // Log this scenario for monitoring
           this.logger.info('Numverify could not determine phone type, defaulting to mobile for FIXED_LINE_OR_MOBILE', {
@@ -680,8 +709,9 @@ class PhoneValidationService {
         countryCode: phoneNumber.countryCallingCode,
         country: phoneNumber.country || successfulCountry,
         type: phoneNumber.getType() || 'UNKNOWN',
-        // Default to mobile for FIXED_LINE_OR_MOBILE when Numverify is unavailable or fails
-        isMobile: phoneNumber.getType() === 'MOBILE' || phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE',
+        // Default to mobile ONLY for FIXED_LINE_OR_MOBILE when Numverify wasn't used or failed
+        isMobile: phoneNumber.getType() === 'MOBILE' || 
+                  (phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE' && !numverifyUsed),
         isFixedLine: phoneNumber.getType() === 'FIXED_LINE',
         isFixedLineOrMobile: phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE',
         isPossible: phoneNumber.isPossible(),
@@ -690,8 +720,8 @@ class PhoneValidationService {
         validationMethod,
         hintCountryUsed: providedCountry === successfulCountry,
         externalApiUsed: false,
-        isFictional: false,
-        numverifyAttempted: needsExternalValidation // Track if we tried Numverify
+        numverifyUsed: numverifyUsed,
+        isFictional: false
       };
       
       // Check if fictional number
@@ -964,14 +994,13 @@ class PhoneValidationService {
       externalApiUsed: validationData.externalApiUsed || false,
       isFictional: validationData.isFictional || false,
       
-      // Unmessy fields - Default is_mobile for ambiguous types
+      // Unmessy fields - Default is_mobile for ambiguous types when Numverify wasn't used
       um_phone: validationData.international || validationData.e164 || originalPhone,
       um_phone_status: wasChanged ? 'Changed' : 'Unchanged',
       um_phone_format: formatValid ? 'Valid' : 'Invalid',
       um_phone_country_code: countryCode || '',
       um_phone_country: countryName,
-      um_phone_is_mobile: validationData.isMobile === true || 
-                          (validationData.type === 'FIXED_LINE_OR_MOBILE' && validationData.numverifyAttempted),
+      um_phone_is_mobile: validationData.isMobile === true,
       
       // Debug info
       detectedCountry: validationData.country,
@@ -981,10 +1010,15 @@ class PhoneValidationService {
     // Add line type flags if available
     if (validationData.isFixedLineOrMobile) {
       result.isFixedLineOrMobile = true;
-      result.numverifyUnavailable = validationData.numverifyAttempted && !validationData.externalApiUsed;
-      if (result.numverifyUnavailable) {
-        result.note = 'Phone type is ambiguous. Defaulted to mobile as external verification was unavailable.';
+      result.typeDefaultedToMobile = !validationData.numverifyUsed;
+      if (result.typeDefaultedToMobile) {
+        result.note = 'Phone type is ambiguous (could be mobile or landline). Defaulted to mobile.';
       }
+    }
+    
+    // Add Numverify usage flag to response
+    if (validationData.numverifyUsed) {
+      result.numverifyUsed = true;
     }
     
     // Add additional details if available
