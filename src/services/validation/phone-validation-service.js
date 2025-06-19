@@ -3,7 +3,7 @@ import db from '../../core/db.js';
 import { config } from '../../core/config.js';
 import { createServiceLogger } from '../../core/logger.js';
 import { ValidationError } from '../../core/errors.js';
-import { parsePhoneNumber, isValidPhoneNumber, ParseError } from 'libphonenumber-js';
+import { parsePhoneNumber, parsePhoneNumberFromString, isValidPhoneNumber, ParseError } from 'libphonenumber-js';
 
 const logger = createServiceLogger('phone-validation-service');
 
@@ -94,13 +94,64 @@ class PhoneValidationService {
         callingCode: '+63',
         mobileBeginnsWith: ['9']
       });
+      
+      // India
+      this.countryPhoneData.set('IN', {
+        callingCode: '+91',
+        mobileBeginnsWith: ['6', '7', '8', '9']
+      });
+      
+      // Japan
+      this.countryPhoneData.set('JP', {
+        callingCode: '+81',
+        mobileBeginnsWith: ['70', '80', '90']
+      });
     }
+  }
+  
+  // Auto-detect country from phone number patterns
+  detectCountryFromNumber(phone) {
+    const cleaned = this.cleanPhoneNumber(phone);
+    
+    // If it starts with +, try to match country code
+    if (cleaned.startsWith('+')) {
+      // Sort by calling code length (longer codes first to avoid false matches)
+      const sortedCountries = Array.from(this.countryPhoneData.entries())
+        .sort((a, b) => b[1].callingCode.length - a[1].callingCode.length);
+      
+      for (const [countryCode, data] of sortedCountries) {
+        if (cleaned.startsWith(data.callingCode)) {
+          return countryCode;
+        }
+      }
+    }
+    
+    // For US/Canada numbers without country code
+    if (cleaned.length === 10 || cleaned.length === 11 && cleaned.startsWith('1')) {
+      return 'US'; // Default to US (same format as Canada)
+    }
+    
+    // For UK numbers without country code (11 digits starting with 0)
+    if (cleaned.length === 11 && cleaned.startsWith('0')) {
+      return 'GB';
+    }
+    
+    // For Philippines numbers (10 or 11 digits starting with 0)
+    if ((cleaned.length === 10 || cleaned.length === 11) && cleaned.startsWith('0')) {
+      // Check if it matches Philippines mobile pattern
+      if (cleaned.startsWith('09')) {
+        return 'PH';
+      }
+    }
+    
+    // Default to configured default country
+    return config.validation.phone.defaultCountry || 'US';
   }
   
   // Validate phone number using libphonenumber-js
   async validatePhoneNumber(phone, options = {}) {
     const {
-      country = config.validation.phone.defaultCountry,
+      country = null, // Allow null to trigger auto-detection
       clientId = null,
       useCache = true
     } = options;
@@ -123,19 +174,43 @@ class PhoneValidationService {
     // Clean phone number
     const cleanedPhone = this.cleanPhoneNumber(phone);
     
+    // Auto-detect country if not provided
+    const detectedCountry = country || this.detectCountryFromNumber(cleanedPhone);
+    
+    this.logger.debug('Country detection', {
+      provided: country,
+      detected: detectedCountry,
+      phone: cleanedPhone
+    });
+    
     try {
-      // Parse phone number
+      // Try parsing phone number
       let phoneNumber;
       
-      // Try parsing with country first
+      // First, try parsing with detected/provided country
       try {
-        phoneNumber = parsePhoneNumber(cleanedPhone, country);
+        phoneNumber = parsePhoneNumber(cleanedPhone, detectedCountry);
       } catch (parseError) {
-        // If parsing with country fails, try without country (for international format)
+        // If that fails and number has international format, try without country
         if (cleanedPhone.startsWith('+')) {
-          phoneNumber = parsePhoneNumber(cleanedPhone);
+          try {
+            phoneNumber = parsePhoneNumberFromString(cleanedPhone);
+          } catch (e) {
+            throw parseError; // Throw original error
+          }
         } else {
-          throw parseError;
+          // Try adding country code for local numbers
+          const countryData = this.countryPhoneData.get(detectedCountry);
+          if (countryData) {
+            const withCountryCode = countryData.callingCode + cleanedPhone.replace(/^0+/, '');
+            try {
+              phoneNumber = parsePhoneNumberFromString(withCountryCode);
+            } catch (e) {
+              throw parseError; // Throw original error
+            }
+          } else {
+            throw parseError;
+          }
         }
       }
       
@@ -147,7 +222,7 @@ class PhoneValidationService {
           valid: false,
           error: 'Invalid phone number format',
           formatValid: false,
-          country: country
+          country: detectedCountry
         }, clientId);
       }
       
@@ -159,17 +234,25 @@ class PhoneValidationService {
         international: phoneNumber.format('INTERNATIONAL'),
         national: phoneNumber.format('NATIONAL'),
         countryCode: phoneNumber.countryCallingCode,
-        country: phoneNumber.country,
-        type: phoneNumber.getType(),
+        country: phoneNumber.country || detectedCountry,
+        type: phoneNumber.getType() || 'UNKNOWN',
         isMobile: phoneNumber.getType() === 'MOBILE',
-        isFixedLine: phoneNumber.getType() === 'FIXED_LINE',
-        isPossible: phoneNumber.isPossible()
+        isFixedLine: phoneNumber.getType() === 'FIXED_LINE' || phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE',
+        isPossible: phoneNumber.isPossible(),
+        uri: phoneNumber.getURI()
       };
       
       // Additional mobile detection for specific countries
-      if (!phoneDetails.isMobile && !phoneDetails.isFixedLine) {
-        phoneDetails.isMobile = this.checkIfMobile(phoneDetails.e164, phoneDetails.country);
+      if (phoneDetails.type === 'FIXED_LINE_OR_MOBILE' || phoneDetails.type === 'UNKNOWN') {
+        const isMobileByPattern = this.checkIfMobile(phoneDetails.e164, phoneDetails.country);
+        if (isMobileByPattern) {
+          phoneDetails.isMobile = true;
+          phoneDetails.type = 'MOBILE';
+        }
       }
+      
+      // Get country name
+      phoneDetails.countryName = this.getCountryName(phoneDetails.country);
       
       return this.buildValidationResult(phone, phoneDetails, clientId);
       
@@ -199,7 +282,8 @@ class PhoneValidationService {
           valid: false,
           error: errorMessage,
           formatValid: false,
-          parseError: error.message
+          parseError: error.message,
+          country: detectedCountry
         }, clientId);
       }
       
@@ -207,7 +291,8 @@ class PhoneValidationService {
       return this.buildValidationResult(phone, {
         valid: false,
         error: 'Failed to validate phone number',
-        formatValid: false
+        formatValid: false,
+        country: detectedCountry
       }, clientId);
     }
   }
@@ -220,11 +305,29 @@ class PhoneValidationService {
     // Remove common formatting characters but keep + for international
     cleaned = cleaned.replace(/[\s\-\(\)\.]/g, '');
     
+    // Remove extension markers and everything after
+    cleaned = cleaned.replace(/(?:ext|x|extension).*$/i, '');
+    
     // Handle common prefixes
     if (cleaned.startsWith('00')) {
       // International prefix used in some countries
       cleaned = '+' + cleaned.substring(2);
     }
+    
+    // Handle letters in phone numbers (like 1-800-FLOWERS)
+    cleaned = cleaned.replace(/[A-Za-z]/g, (match) => {
+      const letterMap = {
+        'A': '2', 'B': '2', 'C': '2',
+        'D': '3', 'E': '3', 'F': '3',
+        'G': '4', 'H': '4', 'I': '4',
+        'J': '5', 'K': '5', 'L': '5',
+        'M': '6', 'N': '6', 'O': '6',
+        'P': '7', 'Q': '7', 'R': '7', 'S': '7',
+        'T': '8', 'U': '8', 'V': '8',
+        'W': '9', 'X': '9', 'Y': '9', 'Z': '9'
+      };
+      return letterMap[match.toUpperCase()] || match;
+    });
     
     return cleaned;
   }
@@ -237,12 +340,96 @@ class PhoneValidationService {
     }
     
     // Remove country calling code to get national number
-    const nationalNumber = e164.replace(countryData.callingCode, '');
+    const nationalNumber = e164.replace(countryData.callingCode, '').replace(/^0+/, '');
     
     // Check if it starts with any mobile pattern
     return countryData.mobileBeginnsWith.some(pattern => 
       nationalNumber.startsWith(pattern)
     );
+  }
+  
+  // Get country name from code
+  getCountryName(countryCode) {
+    const countryNames = {
+      'US': 'United States',
+      'CA': 'Canada',
+      'GB': 'United Kingdom',
+      'AU': 'Australia',
+      'DE': 'Germany',
+      'FR': 'France',
+      'PH': 'Philippines',
+      'IN': 'India',
+      'JP': 'Japan',
+      'CN': 'China',
+      'BR': 'Brazil',
+      'MX': 'Mexico',
+      'ES': 'Spain',
+      'IT': 'Italy',
+      'NL': 'Netherlands',
+      'SE': 'Sweden',
+      'NO': 'Norway',
+      'DK': 'Denmark',
+      'FI': 'Finland',
+      'PL': 'Poland',
+      'RU': 'Russia',
+      'ZA': 'South Africa',
+      'SG': 'Singapore',
+      'MY': 'Malaysia',
+      'TH': 'Thailand',
+      'VN': 'Vietnam',
+      'ID': 'Indonesia',
+      'KR': 'South Korea',
+      'TW': 'Taiwan',
+      'HK': 'Hong Kong',
+      'NZ': 'New Zealand',
+      'AR': 'Argentina',
+      'CL': 'Chile',
+      'CO': 'Colombia',
+      'PE': 'Peru',
+      'VE': 'Venezuela',
+      'EC': 'Ecuador',
+      'BO': 'Bolivia',
+      'PY': 'Paraguay',
+      'UY': 'Uruguay',
+      'CR': 'Costa Rica',
+      'PA': 'Panama',
+      'DO': 'Dominican Republic',
+      'GT': 'Guatemala',
+      'HN': 'Honduras',
+      'SV': 'El Salvador',
+      'NI': 'Nicaragua',
+      'PR': 'Puerto Rico',
+      'JM': 'Jamaica',
+      'TT': 'Trinidad and Tobago',
+      'BB': 'Barbados',
+      'BS': 'Bahamas',
+      'BM': 'Bermuda',
+      'KY': 'Cayman Islands',
+      'VG': 'British Virgin Islands',
+      'AG': 'Antigua and Barbuda',
+      'DM': 'Dominica',
+      'GD': 'Grenada',
+      'KN': 'Saint Kitts and Nevis',
+      'LC': 'Saint Lucia',
+      'VC': 'Saint Vincent and the Grenadines',
+      'MQ': 'Martinique',
+      'GP': 'Guadeloupe',
+      'AW': 'Aruba',
+      'CW': 'Curaçao',
+      'SX': 'Sint Maarten',
+      'BQ': 'Caribbean Netherlands',
+      'TC': 'Turks and Caicos Islands',
+      'VI': 'U.S. Virgin Islands',
+      'AI': 'Anguilla',
+      'MS': 'Montserrat',
+      'GU': 'Guam',
+      'AS': 'American Samoa',
+      'MP': 'Northern Mariana Islands',
+      'PW': 'Palau',
+      'MH': 'Marshall Islands'
+    };
+    
+    return countryNames[countryCode] || countryCode;
   }
   
   // Build validation result
@@ -251,45 +438,43 @@ class PhoneValidationService {
     
     const result = {
       originalPhone,
+      currentPhone: validationData.e164 || this.cleanPhoneNumber(originalPhone),
       valid: isValid,
+      possible: validationData.isPossible !== false,
       formatValid: validationData.formatValid !== false,
       error: validationData.error || null,
       
+      // Phone type
+      type: validationData.type || 'UNKNOWN',
+      
+      // Location info
+      location: validationData.countryName || this.getCountryName(validationData.country),
+      carrier: '', // Would need external service for carrier lookup
+      
       // Phone formats
       e164: validationData.e164 || null,
-      international: validationData.international || null,
-      national: validationData.national || null,
+      internationalFormat: validationData.international || null,
+      nationalFormat: validationData.national || null,
+      uri: validationData.uri || null,
       
-      // Phone details
-      countryCode: validationData.countryCode || null,
-      country: validationData.country || null,
-      type: validationData.type || 'UNKNOWN',
-      isMobile: validationData.isMobile || false,
-      isFixedLine: validationData.isFixedLine || false,
+      // Country details
+      countryCode: validationData.country || null,
+      countryCallingCode: validationData.countryCode || null,
+      
+      // Additional details
+      confidence: isValid ? 'high' : 'low',
       
       // Unmessy fields
-      um_phone: validationData.e164 || originalPhone,
+      um_phone: validationData.international || validationData.e164 || originalPhone,
       um_phone_status: isValid ? 'Valid' : 'Invalid',
-      um_phone_format: validationData.international || originalPhone,
-      um_phone_country_code: validationData.countryCode || '',
-      um_phone_country: validationData.country || '',
-      um_phone_is_mobile: validationData.isMobile ? 'Yes' : 'No',
+      um_phone_format: 'International',
+      um_phone_country_code: validationData.country || '',
+      um_phone_country: validationData.countryName || this.getCountryName(validationData.country) || '',
+      um_phone_is_mobile: validationData.isMobile || false,
       
-      // Validation steps
-      validationSteps: [
-        {
-          step: 'format_check',
-          passed: validationData.formatValid !== false
-        },
-        {
-          step: 'number_parsing',
-          passed: isValid
-        },
-        {
-          step: 'type_detection',
-          type: validationData.type || 'UNKNOWN'
-        }
-      ]
+      // Debug info
+      detectedCountry: validationData.country,
+      parseError: validationData.parseError || null
     };
     
     return result;
@@ -309,22 +494,26 @@ class PhoneValidationService {
       if (data) {
         return {
           originalPhone: data.original_phone,
+          currentPhone: data.e164,
           valid: data.valid,
+          possible: true,
           formatValid: true,
-          e164: data.e164,
-          international: data.international_format,
-          national: data.national_format,
-          countryCode: data.country_code,
-          country: data.country,
           type: data.phone_type,
-          isMobile: data.is_mobile,
-          isFixedLine: data.phone_type === 'FIXED_LINE',
-          um_phone: data.e164,
+          location: this.getCountryName(data.country),
+          carrier: '',
+          e164: data.e164,
+          internationalFormat: data.international_format,
+          nationalFormat: data.national_format,
+          uri: `tel:${data.e164}`,
+          countryCode: data.country,
+          countryCallingCode: data.country_code,
+          confidence: 'high',
+          um_phone: data.international_format,
           um_phone_status: data.valid ? 'Valid' : 'Invalid',
-          um_phone_format: data.international_format,
-          um_phone_country_code: data.country_code,
-          um_phone_country: data.country,
-          um_phone_is_mobile: data.is_mobile ? 'Yes' : 'No',
+          um_phone_format: 'International',
+          um_phone_country_code: data.country,
+          um_phone_country: this.getCountryName(data.country),
+          um_phone_is_mobile: data.is_mobile,
           isFromCache: true
         };
       }
@@ -346,12 +535,12 @@ class PhoneValidationService {
       await db.insert('phone_validations', {
         original_phone: phone,
         e164: validationResult.e164,
-        international_format: validationResult.international,
-        national_format: validationResult.national,
-        country_code: validationResult.countryCode,
-        country: validationResult.country,
+        international_format: validationResult.internationalFormat,
+        national_format: validationResult.nationalFormat,
+        country_code: validationResult.countryCallingCode,
+        country: validationResult.countryCode,
         phone_type: validationResult.type,
-        is_mobile: validationResult.isMobile,
+        is_mobile: validationResult.um_phone_is_mobile,
         valid: validationResult.valid,
         client_id: clientId
       });
