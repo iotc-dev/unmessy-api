@@ -3,7 +3,13 @@ import db from '../../core/db.js';
 import { config } from '../../core/config.js';
 import { createServiceLogger } from '../../core/logger.js';
 import { ValidationError } from '../../core/errors.js';
-import { parsePhoneNumber, parsePhoneNumberFromString, getCountryCallingCode, getCountries, ParseError } from 'libphonenumber-js';
+import { 
+  parsePhoneNumber, 
+  parsePhoneNumberFromString, 
+  getCountryCallingCode, 
+  getCountries, 
+  ParseError 
+} from 'libphonenumber-js';
 
 const logger = createServiceLogger('phone-validation-service');
 
@@ -11,53 +17,8 @@ class PhoneValidationService {
   constructor() {
     this.logger = logger;
     
-    // Initialize reference data
-    this.countryPhoneData = new Map();
-    this.mobilePatterns = new Map();
-    
-    // Load normalization data on startup
-    this.loadNormalizationData();
-  }
-  
-  async loadNormalizationData() {
-    try {
-      // Load country phone data from database using proper Supabase method
-      const countryData = await db.select(
-        'country_phone_data',
-        {},
-        { columns: 'country_code, calling_code, mobile_begins_with' }
-      ).catch(() => ({ rows: [] }));
-      
-      if (countryData?.rows) {
-        countryData.rows.forEach(row => {
-          this.countryPhoneData.set(row.country_code, {
-            callingCode: row.calling_code,
-            mobileBeginnsWith: row.mobile_begins_with ? row.mobile_begins_with.split(',') : []
-          });
-        });
-      }
-      
-      // Initialize default data if database is empty
-      this.initializeDefaultData();
-      
-      this.logger.info('Phone normalization data loaded', {
-        countries: this.countryPhoneData.size
-      });
-    } catch (error) {
-      this.logger.error('Failed to load normalization data', error);
-      // Initialize with defaults
-      this.initializeDefaultData();
-    }
-  }
-  
-  initializeDefaultData() {
-    // The libphonenumber-js library already contains all country metadata
-    // We only need to store mobile patterns if they're not in the database
-    // and the library can't determine them accurately
-    
-    // This is now just a fallback for mobile pattern detection
-    // The library handles all country codes and validation
-    this.logger.debug('Using libphonenumber-js built-in country data');
+    // No need to load country data - libphonenumber-js has it all!
+    this.logger.info('Phone validation service initialized using libphonenumber-js');
   }
   
   // Auto-detect country from phone number patterns
@@ -123,6 +84,15 @@ class PhoneValidationService {
     // Clean phone number
     const cleanedPhone = this.cleanPhoneNumber(phone);
     
+    // Check cache first if enabled
+    if (useCache && cleanedPhone.startsWith('+')) {
+      const cached = await this.checkPhoneCache(cleanedPhone);
+      if (cached) {
+        this.logger.debug('Phone found in cache', { phone: cleanedPhone });
+        return cached;
+      }
+    }
+    
     // Auto-detect country if not provided
     const detectedCountry = country || this.detectCountryFromNumber(cleanedPhone);
     
@@ -148,17 +118,13 @@ class PhoneValidationService {
             throw parseError; // Throw original error
           }
         } else {
-          // Try adding country code for local numbers
-          const countryData = this.countryPhoneData.get(detectedCountry);
-          if (countryData) {
-            const withCountryCode = countryData.callingCode + cleanedPhone.replace(/^0+/, '');
-            try {
-              phoneNumber = parsePhoneNumberFromString(withCountryCode);
-            } catch (e) {
-              throw parseError; // Throw original error
-            }
-          } else {
-            throw parseError;
+          // Try adding country code for local numbers using library function
+          try {
+            const callingCode = getCountryCallingCode(detectedCountry);
+            const withCountryCode = '+' + callingCode + cleanedPhone.replace(/^0+/, '');
+            phoneNumber = parsePhoneNumberFromString(withCountryCode);
+          } catch (e) {
+            throw parseError; // Throw original error
           }
         }
       }
@@ -186,24 +152,32 @@ class PhoneValidationService {
         country: phoneNumber.country || detectedCountry,
         type: phoneNumber.getType() || 'UNKNOWN',
         isMobile: phoneNumber.getType() === 'MOBILE',
-        isFixedLine: phoneNumber.getType() === 'FIXED_LINE' || phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE',
+        isFixedLine: phoneNumber.getType() === 'FIXED_LINE',
+        isFixedLineOrMobile: phoneNumber.getType() === 'FIXED_LINE_OR_MOBILE',
         isPossible: phoneNumber.isPossible(),
         uri: phoneNumber.getURI()
       };
       
-      // Additional mobile detection for specific countries
-      if (phoneDetails.type === 'FIXED_LINE_OR_MOBILE' || phoneDetails.type === 'UNKNOWN') {
-        const isMobileByPattern = this.checkIfMobile(phoneDetails.e164, phoneDetails.country);
-        if (isMobileByPattern) {
+      // For FIXED_LINE_OR_MOBILE, default to mobile for common mobile countries
+      if (phoneDetails.isFixedLineOrMobile) {
+        // Common mobile-first countries
+        const mobileFirstCountries = ['US', 'CA', 'PH', 'IN', 'BR', 'MX'];
+        if (mobileFirstCountries.includes(phoneDetails.country)) {
           phoneDetails.isMobile = true;
-          phoneDetails.type = 'MOBILE';
         }
       }
       
       // Get country name
       phoneDetails.countryName = this.getCountryName(phoneDetails.country);
       
-      return this.buildValidationResult(phone, phoneDetails, clientId);
+      const result = this.buildValidationResult(phone, phoneDetails, clientId);
+      
+      // Save to cache if valid
+      if (useCache && result.valid) {
+        await this.savePhoneCache(phone, result, clientId);
+      }
+      
+      return result;
       
     } catch (error) {
       this.logger.debug('Phone parsing failed', { phone, error: error.message });
@@ -279,24 +253,6 @@ class PhoneValidationService {
     });
     
     return cleaned;
-  }
-  
-  // Check if number is mobile based on patterns
-  checkIfMobile(e164, countryCode) {
-    // First, check if we have custom mobile patterns in the database
-    const countryData = this.countryPhoneData.get(countryCode);
-    if (countryData && countryData.mobileBeginnsWith && countryData.mobileBeginnsWith.length > 0) {
-      // Remove country calling code to get national number
-      const nationalNumber = e164.replace(countryData.callingCode, '').replace(/^0+/, '');
-      
-      // Check if it starts with any mobile pattern
-      return countryData.mobileBeginnsWith.some(pattern => 
-        nationalNumber.startsWith(pattern)
-      );
-    }
-    
-    // Otherwise, rely on libphonenumber-js detection
-    return false;
   }
   
   // Get country name from code
@@ -377,7 +333,8 @@ class PhoneValidationService {
       'AS': 'American Samoa',
       'MP': 'Northern Mariana Islands',
       'PW': 'Palau',
-      'MH': 'Marshall Islands'
+      'MH': 'Marshall Islands',
+      // Add more as needed
     };
     
     return countryNames[countryCode] || countryCode;
@@ -436,7 +393,7 @@ class PhoneValidationService {
     return result;
   }
   
-  // Cache operations
+  // Cache operations - Only for storing validated results, not country data
   async checkPhoneCache(e164Phone) {
     try {
       const { rows } = await db.select(
@@ -511,6 +468,16 @@ class PhoneValidationService {
         this.logger.error('Failed to save phone validation', error, { phone });
       }
     }
+  }
+  
+  // Utility function to get all supported countries (for reference/UI)
+  getAllSupportedCountries() {
+    const countries = getCountries();
+    return countries.map(country => ({
+      code: country,
+      name: this.getCountryName(country),
+      callingCode: getCountryCallingCode(country)
+    }));
   }
 }
 
