@@ -386,13 +386,18 @@ class PhoneValidationService {
   // Build validation result
   buildValidationResult(originalPhone, validationData, clientId) {
     const isValid = validationData.valid === true;
+    const formatValid = validationData.formatValid !== false;
+    
+    // Determine if phone was changed (formatted differently)
+    const formattedPhone = validationData.international || validationData.e164 || this.cleanPhoneNumber(originalPhone);
+    const wasChanged = originalPhone !== formattedPhone;
     
     const result = {
       originalPhone,
       currentPhone: validationData.e164 || this.cleanPhoneNumber(originalPhone),
       valid: isValid,
       possible: validationData.isPossible !== false,
-      formatValid: validationData.formatValid !== false,
+      formatValid: formatValid,
       error: validationData.error || null,
       
       // Phone type
@@ -417,8 +422,8 @@ class PhoneValidationService {
       
       // Unmessy fields
       um_phone: validationData.international || validationData.e164 || originalPhone,
-      um_phone_status: isValid ? 'Valid' : 'Invalid',
-      um_phone_format: 'International',
+      um_phone_status: wasChanged ? 'Changed' : 'Unchanged',
+      um_phone_format: formatValid ? 'Valid' : 'Invalid',
       um_phone_country_code: validationData.country || '',
       um_phone_country: validationData.countryName || this.getCountryName(validationData.country) || '',
       um_phone_is_mobile: validationData.isMobile || false,
@@ -460,8 +465,8 @@ class PhoneValidationService {
           countryCallingCode: data.country_code,
           confidence: 'high',
           um_phone: data.international_format,
-          um_phone_status: data.valid ? 'Valid' : 'Invalid',
-          um_phone_format: 'International',
+          um_phone_status: data.original_phone !== data.international_format ? 'Changed' : 'Unchanged',
+          um_phone_format: 'Valid',
           um_phone_country_code: data.country,
           um_phone_country: this.getCountryName(data.country),
           um_phone_is_mobile: data.is_mobile,
