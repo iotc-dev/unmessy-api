@@ -5,7 +5,7 @@ import { createServiceLogger } from '../../core/logger.js';
 import { ValidationError } from '../../core/errors.js';
 import { 
   parsePhoneNumber, 
-  parsePhoneNumberFromString, 
+  parsePhoneNumberFromString,
   getCountryCallingCode, 
   getCountries, 
   ParseError 
@@ -16,182 +16,127 @@ const logger = createServiceLogger('phone-validation-service');
 class PhoneValidationService {
   constructor() {
     this.logger = logger;
-    
-    // No need to load country data - libphonenumber-js has it all!
     this.logger.info('Phone validation service initialized using libphonenumber-js');
   }
   
-  // Auto-detect country from phone number patterns
-  detectCountryFromNumber(phone) {
-    const cleaned = this.cleanPhoneNumber(phone);
+  // Calculate confidence level based on validation context
+  calculateConfidence(phoneNumber, parseAttempts, options = {}) {
+    const {
+      providedCountry,
+      detectedMethod,
+      originalHasPlus,
+      requiredPrefixAdd,
+      multipleValidCountries
+    } = options;
     
-    // If it starts with +, let libphonenumber-js handle it
-    if (cleaned.startsWith('+')) {
-      try {
-        const phoneNumber = parsePhoneNumberFromString(cleaned);
-        if (phoneNumber && phoneNumber.country) {
-          return phoneNumber.country;
-        }
-      } catch (e) {
-        // Continue with fallback detection
-      }
+    // Start with base confidence
+    let confidence = 0;
+    let factors = [];
+    
+    // Factor 1: How the number was parsed (40 points max)
+    if (detectedMethod === 'auto-detect-international' && originalHasPlus) {
+      confidence += 40;
+      factors.push('international_format');
+    } else if (detectedMethod === 'provided-country' && providedCountry) {
+      confidence += 35;
+      factors.push('explicit_country');
+    } else if (detectedMethod === 'fallback-country' && parseAttempts.length === 1) {
+      confidence += 30;
+      factors.push('unambiguous_local');
+    } else if (detectedMethod === 'fallback-country') {
+      confidence += 20;
+      factors.push('ambiguous_local');
+    } else if (detectedMethod === 'auto-detect-with-prefix') {
+      confidence += 15;
+      factors.push('prefix_required');
     }
     
-    // Handle specific patterns before defaulting to US
-    if (cleaned.startsWith('0')) {
-      // Australian numbers: 10 digits starting with 0
-      if (cleaned.length === 10) {
-        // Australian mobile: 04XX XXX XXX
-        if (cleaned.startsWith('04')) {
-          return 'AU';
-        }
-        // Australian landline area codes: 02, 03, 07, 08
-        if (cleaned.match(/^0[2378]/)) {
-          return 'AU';
-        }
-        // Philippines mobile: 09XX XXX XXXX
-        if (cleaned.startsWith('09')) {
-          return 'PH';
-        }
-        // New Zealand: 03, 04, 06, 07, 09 (10 digits)
-        if (cleaned.match(/^0[34679]/)) {
-          return 'NZ';
-        }
-        // South Africa: 10 digits starting with 0
-        if (cleaned.match(/^0[1-8]/)) {
-          return 'ZA';
-        }
-      }
-      // UK numbers: 11 digits starting with 0
-      if (cleaned.length === 11) {
-        // UK mobile: 07XXX XXXXXX
-        if (cleaned.startsWith('07')) {
-          return 'GB';
-        }
-        // UK landline patterns
-        if (cleaned.match(/^0[1-9]/)) {
-          return 'GB';
-        }
-      }
-      // Philippines landline: 8 digits (without area code)
-      if (cleaned.length === 8 && cleaned.match(/^[2-9]/)) {
-        return 'PH';
-      }
+    // Factor 2: Number validity and type (30 points max)
+    if (phoneNumber.isValid() && phoneNumber.isPossible()) {
+      confidence += 30;
+      factors.push('valid_possible');
+    } else if (phoneNumber.isValid()) {
+      confidence += 20;
+      factors.push('valid_only');
+    } else if (phoneNumber.isPossible()) {
+      confidence += 10;
+      factors.push('possible_only');
     }
     
-    // Singapore numbers: 8 digits starting with 6, 8, or 9
-    if (cleaned.length === 8 && cleaned.match(/^[689]/)) {
-      return 'SG';
+    // Factor 3: Phone type certainty (20 points max)
+    const phoneType = phoneNumber.getType();
+    if (phoneType === 'MOBILE' || phoneType === 'FIXED_LINE') {
+      confidence += 20;
+      factors.push('definite_type');
+    } else if (phoneType === 'FIXED_LINE_OR_MOBILE') {
+      confidence += 10;
+      factors.push('ambiguous_type');
+    } else {
+      confidence += 5;
+      factors.push('unknown_type');
     }
     
-    // Hong Kong numbers: 8 digits starting with 2, 3, 5, 6, 7, 8, 9
-    if (cleaned.length === 8 && cleaned.match(/^[235-9]/)) {
-      return 'HK';
+    // Factor 4: Parse attempt clarity (10 points max)
+    const successfulAttempts = parseAttempts.filter(a => a.success).length;
+    const failedAttempts = parseAttempts.filter(a => !a.success).length;
+    
+    if (successfulAttempts === 1 && failedAttempts === 0) {
+      confidence += 10;
+      factors.push('first_try_success');
+    } else if (successfulAttempts === 1 && failedAttempts <= 2) {
+      confidence += 7;
+      factors.push('quick_success');
+    } else if (successfulAttempts === 1) {
+      confidence += 5;
+      factors.push('eventual_success');
     }
     
-    // India numbers: 10 digits not starting with 0 or 1
-    if (cleaned.length === 10 && cleaned.match(/^[2-9]/)) {
-      // Check if it could be Indian mobile (starting with 6-9)
-      if (cleaned.match(/^[6-9]/)) {
-        return 'IN';
-      }
+    // Penalty factors
+    if (multipleValidCountries) {
+      confidence -= 15;
+      factors.push('multiple_valid_countries');
     }
     
-    // Brazil numbers: 10-11 digits
-    if (cleaned.length === 10 && cleaned.match(/^[1-9]{2}/)) {
-      return 'BR';
-    }
-    if (cleaned.length === 11 && cleaned.match(/^[1-9]{2}9/)) {
-      // Brazilian mobile with 9 prefix
-      return 'BR';
+    if (requiredPrefixAdd) {
+      confidence -= 10;
+      factors.push('prefix_guessing_required');
     }
     
-    // Mexico numbers: 10 digits
-    if (cleaned.length === 10 && cleaned.match(/^[2-9]/)) {
-      // Could be Mexico, but also could be US - need more context
-      // Check for Mexican area codes patterns
-      if (cleaned.match(/^(33|55|81|656|664|998|222|229|244)/)) {
-        return 'MX';
-      }
+    // Ensure confidence is between 0 and 100
+    confidence = Math.max(0, Math.min(100, confidence));
+    
+    // Convert to descriptive level
+    let level;
+    if (confidence >= 85) {
+      level = 'very_high';
+    } else if (confidence >= 70) {
+      level = 'high';
+    } else if (confidence >= 50) {
+      level = 'medium';
+    } else if (confidence >= 30) {
+      level = 'low';
+    } else {
+      level = 'very_low';
     }
     
-    // Japan numbers: Various lengths (9-11 digits)
-    if (cleaned.length >= 9 && cleaned.length <= 11) {
-      // Japanese mobile: 070, 080, 090
-      if (cleaned.match(/^0[789]0/)) {
-        return 'JP';
-      }
-      // Tokyo landline: 03
-      if (cleaned.startsWith('03') && cleaned.length === 10) {
-        return 'JP';
-      }
-    }
-    
-    // German numbers: 11-12 digits starting with 0
-    if ((cleaned.length === 11 || cleaned.length === 12) && cleaned.startsWith('0')) {
-      // German mobile: 015, 016, 017
-      if (cleaned.match(/^01[567]/)) {
-        return 'DE';
-      }
-    }
-    
-    // French numbers: 10 digits starting with 0
-    if (cleaned.length === 10 && cleaned.startsWith('0')) {
-      // French mobile: 06, 07
-      if (cleaned.match(/^0[67]/)) {
-        return 'FR';
-      }
-      // French landline: 01-05, 09
-      if (cleaned.match(/^0[1-59]/)) {
-        return 'FR';
-      }
-    }
-    
-    // Italian numbers: 10 digits (mobiles) or 9-11 (landlines)
-    if (cleaned.startsWith('3') && cleaned.length === 10) {
-      return 'IT'; // Italian mobile
-    }
-    
-    // Spanish numbers: 9 digits
-    if (cleaned.length === 9) {
-      // Spanish mobile: 6XX or 7XX
-      if (cleaned.match(/^[67]/)) {
-        return 'ES';
-      }
-      // Spanish landline: 8XX or 9XX
-      if (cleaned.match(/^[89]/)) {
-        return 'ES';
-      }
-    }
-    
-    // Russian numbers: 11 digits starting with 7 or 8
-    if (cleaned.length === 11 && cleaned.match(/^[78]/)) {
-      return 'RU';
-    }
-    
-    // US/Canada numbers (10 digits not starting with 0 or 1, or 11 digits starting with 1)
-    if ((cleaned.length === 10 && !cleaned.startsWith('0') && !cleaned.startsWith('1')) || 
-        (cleaned.length === 11 && cleaned.startsWith('1'))) {
-      return 'US';
-    }
-    
-    // Default to configured default country
-    return config.validation.phone.defaultCountry || 'US';
+    return {
+      score: confidence,
+      level,
+      factors
+    };
   }
   
   // Validate phone number using libphonenumber-js
   async validatePhoneNumber(phone, options = {}) {
     const {
-      country = null, // Allow explicit country to be passed
-      countryHint = null, // Alternative way to specify country
-      strictCountry = false, // If true, only use provided country
-      fallbackCountries = ['AU', 'GB', 'PH', 'CA', 'NZ', 'IN', 'US'], // Countries to try
-      tryAllCountries = false, // If true, try parsing with many countries
+      country = null,
+      countryHint = null,
+      strictCountry = false,
+      fallbackCountries = ['AU', 'GB', 'NZ', 'US', 'CA', 'PH', 'IN'],
       clientId = null,
       useCache = true
     } = options;
     
-    // Use provided country first
     const providedCountry = country || countryHint;
     
     this.logger.debug('Starting phone validation', {
@@ -206,12 +151,14 @@ class PhoneValidationService {
       return this.buildValidationResult(phone, {
         valid: false,
         error: 'Phone number is required',
-        formatValid: false
+        formatValid: false,
+        confidence: { score: 0, level: 'none', factors: ['no_input'] }
       }, clientId);
     }
     
     // Clean phone number
     const cleanedPhone = this.cleanPhoneNumber(phone);
+    const originalHasPlus = cleanedPhone.startsWith('+');
     
     // Check cache first if enabled
     if (useCache && cleanedPhone.startsWith('+')) {
@@ -222,173 +169,180 @@ class PhoneValidationService {
       }
     }
     
-    // Determine country: provided > detected > default
-    let detectedCountry = providedCountry;
-    if (!detectedCountry && !strictCountry) {
-      detectedCountry = this.detectCountryFromNumber(cleanedPhone);
-      
-      // Log potential mismatches for debugging
-      if (detectedCountry === 'US' && cleanedPhone.startsWith('0')) {
-        this.logger.warn('Potential country mismatch: Non-US format number defaulted to US', { 
-          cleanedPhone,
-          detectedCountry 
-        });
-      }
-    }
-    
-    this.logger.debug('Country detection', {
-      provided: providedCountry,
-      detected: detectedCountry,
-      phone: cleanedPhone
-    });
-    
-    // Try parsing with multiple strategies
     let phoneNumber = null;
     let successfulCountry = null;
     let parseAttempts = [];
+    let detectedMethod = null;
+    let requiredPrefixAdd = false;
+    let validCountries = [];
     
     try {
-      // Strategy 1: Try with provided country first (if specified)
-      if (providedCountry) {
+      // Strategy 1: If number has international format (+XX...), let library auto-detect
+      if (cleanedPhone.startsWith('+')) {
+        try {
+          phoneNumber = parsePhoneNumberFromString(cleanedPhone);
+          if (phoneNumber && phoneNumber.isValid()) {
+            successfulCountry = phoneNumber.country;
+            detectedMethod = 'auto-detect-international';
+            parseAttempts.push({ method: 'auto-detect-international', success: true, country: successfulCountry });
+          }
+        } catch (e) {
+          parseAttempts.push({ method: 'auto-detect-international', success: false, reason: e.message });
+        }
+      }
+      
+      // Strategy 2: Try with provided country if specified
+      if (!phoneNumber && providedCountry) {
         try {
           phoneNumber = parsePhoneNumber(cleanedPhone, providedCountry);
           if (phoneNumber && phoneNumber.isValid()) {
             successfulCountry = providedCountry;
-            parseAttempts.push({ country: providedCountry, success: true });
+            detectedMethod = 'provided-country';
+            parseAttempts.push({ method: 'provided-country', country: providedCountry, success: true });
           } else {
-            parseAttempts.push({ country: providedCountry, success: false, reason: 'Invalid' });
+            parseAttempts.push({ method: 'provided-country', country: providedCountry, success: false, reason: 'Invalid' });
             
-            // If strict mode, don't try other countries
             if (strictCountry) {
+              const confidence = this.calculateConfidence(null, parseAttempts, {
+                providedCountry,
+                detectedMethod: 'failed',
+                originalHasPlus
+              });
+              
               return this.buildValidationResult(phone, {
                 valid: false,
                 error: `Invalid ${this.getCountryName(providedCountry)} phone number`,
                 formatValid: false,
                 country: providedCountry,
-                parseAttempts
+                parseAttempts,
+                confidence
               }, clientId);
             }
           }
         } catch (e) {
-          parseAttempts.push({ country: providedCountry, success: false, reason: e.message });
+          parseAttempts.push({ method: 'provided-country', country: providedCountry, success: false, reason: e.message });
           
           if (strictCountry) {
+            const confidence = this.calculateConfidence(null, parseAttempts, {
+              providedCountry,
+              detectedMethod: 'failed',
+              originalHasPlus
+            });
+            
             return this.buildValidationResult(phone, {
               valid: false,
               error: `Not a valid ${this.getCountryName(providedCountry)} phone number format`,
               formatValid: false,
               country: providedCountry,
-              parseAttempts
+              parseAttempts,
+              confidence
             }, clientId);
           }
-          
-          this.logger.debug('Failed to parse with provided country', { 
-            country: providedCountry, 
-            error: e.message 
-          });
         }
       }
       
-      // Strategy 2: Try with detected country (if different from provided)
-      if (!phoneNumber && detectedCountry && detectedCountry !== providedCountry) {
-        try {
-          phoneNumber = parsePhoneNumber(cleanedPhone, detectedCountry);
-          if (phoneNumber && phoneNumber.isValid()) {
-            successfulCountry = detectedCountry;
-            parseAttempts.push({ country: detectedCountry, success: true });
-            
-            // Warn if provided country was wrong
-            if (providedCountry) {
-              this.logger.warn('Provided country was incorrect', {
-                provided: providedCountry,
-                actual: detectedCountry,
-                phone: cleanedPhone
-              });
-            }
-          } else {
-            parseAttempts.push({ country: detectedCountry, success: false, reason: 'Invalid' });
-          }
-        } catch (e) {
-          parseAttempts.push({ country: detectedCountry, success: false, reason: e.message });
-        }
-      }
-      
-      // Strategy 3: If number has + prefix, try without country
-      if (!phoneNumber && cleanedPhone.startsWith('+')) {
-        try {
-          phoneNumber = parsePhoneNumberFromString(cleanedPhone);
-          if (phoneNumber && phoneNumber.isValid()) {
-            successfulCountry = phoneNumber.country;
-            parseAttempts.push({ country: 'AUTO', success: true, detected: successfulCountry });
-            
-            // Warn if provided country was wrong
-            if (providedCountry && providedCountry !== successfulCountry) {
-              this.logger.warn('Provided country was incorrect', {
-                provided: providedCountry,
-                actual: successfulCountry,
-                phone: cleanedPhone
-              });
-            }
-          }
-        } catch (e) {
-          parseAttempts.push({ country: 'AUTO', success: false, reason: e.message });
-        }
-      }
-      
-      // Strategy 4: Try fallback countries
+      // Strategy 3: For local numbers (no country code), try fallback countries
       if (!phoneNumber && !cleanedPhone.startsWith('+')) {
-        const countriesToTry = tryAllCountries ? 
-          getCountries() : // All countries from libphonenumber-js
-          fallbackCountries;
-          
-        for (const fallbackCountry of countriesToTry) {
+        // First, check which countries this could be valid in
+        for (const testCountry of fallbackCountries) {
           try {
-            // Skip if we already tried this country
-            if (parseAttempts.some(a => a.country === fallbackCountry)) continue;
+            const testPhone = parsePhoneNumber(cleanedPhone, testCountry);
+            if (testPhone && testPhone.isValid()) {
+              validCountries.push(testCountry);
+            }
+          } catch (e) {
+            // Not valid for this country
+          }
+        }
+        
+        // Now actually parse with fallback countries
+        for (const testCountry of fallbackCountries) {
+          try {
+            // Skip if already tried
+            if (parseAttempts.some(a => a.country === testCountry && a.method !== 'validation-check')) continue;
             
-            // For local numbers, add country code
-            const callingCode = getCountryCallingCode(fallbackCountry);
-            const withCountryCode = '+' + callingCode + cleanedPhone.replace(/^0+/, '');
-            
-            phoneNumber = parsePhoneNumberFromString(withCountryCode);
+            phoneNumber = parsePhoneNumber(cleanedPhone, testCountry);
             if (phoneNumber && phoneNumber.isValid()) {
-              successfulCountry = fallbackCountry;
-              parseAttempts.push({ country: fallbackCountry, success: true });
-              
-              // Warn if provided country was wrong
-              if (providedCountry && providedCountry !== successfulCountry) {
-                this.logger.warn('Provided country was incorrect', {
-                  provided: providedCountry,
-                  actual: successfulCountry,
-                  phone: cleanedPhone
-                });
-              }
+              successfulCountry = testCountry;
+              detectedMethod = 'fallback-country';
+              parseAttempts.push({ method: 'fallback-country', country: testCountry, success: true });
               
               this.logger.debug('Successfully parsed with fallback country', { 
-                country: fallbackCountry 
+                country: testCountry,
+                phone: cleanedPhone,
+                validInCountries: validCountries
               });
               break;
             } else {
-              parseAttempts.push({ country: fallbackCountry, success: false, reason: 'Invalid' });
+              parseAttempts.push({ method: 'fallback-country', country: testCountry, success: false, reason: 'Invalid' });
             }
           } catch (e) {
-            parseAttempts.push({ country: fallbackCountry, success: false, reason: e.message });
+            parseAttempts.push({ method: 'fallback-country', country: testCountry, success: false, reason: e.message });
           }
         }
       }
       
-      // If still no valid parse, return error with attempts info
+      // Strategy 4: Try adding international prefixes
+      if (!phoneNumber && !cleanedPhone.startsWith('+')) {
+        try {
+          const prefixesToTry = [
+            { prefix: '+61', country: 'AU' },  // Australia
+            { prefix: '+44', country: 'GB' },  // UK
+            { prefix: '+64', country: 'NZ' },  // New Zealand
+            { prefix: '+1', country: 'US' },   // US/Canada
+            { prefix: '+91', country: 'IN' },  // India
+            { prefix: '+63', country: 'PH' }   // Philippines
+          ];
+          
+          for (const { prefix, country } of prefixesToTry) {
+            const numberWithPrefix = prefix + cleanedPhone.replace(/^0+/, '');
+            const parsed = parsePhoneNumberFromString(numberWithPrefix);
+            
+            if (parsed && parsed.isValid()) {
+              phoneNumber = parsed;
+              successfulCountry = parsed.country;
+              detectedMethod = 'auto-detect-with-prefix';
+              requiredPrefixAdd = true;
+              parseAttempts.push({ 
+                method: 'auto-detect-with-prefix', 
+                prefix, 
+                success: true, 
+                country: successfulCountry 
+              });
+              break;
+            }
+          }
+        } catch (e) {
+          parseAttempts.push({ method: 'auto-detect-fallback', success: false, reason: e.message });
+        }
+      }
+      
+      // If still no valid parse, return error
       if (!phoneNumber || !phoneNumber.isValid()) {
-        const attemptedCountries = parseAttempts.map(a => a.country).join(', ');
+        const attemptedCountries = [...new Set(parseAttempts.filter(a => a.country).map(a => a.country))].join(', ');
+        const confidence = this.calculateConfidence(null, parseAttempts, {
+          providedCountry,
+          detectedMethod: 'failed',
+          originalHasPlus
+        });
+        
         return this.buildValidationResult(phone, {
           valid: false,
-          error: `Invalid phone number format. Tried countries: ${attemptedCountries}`,
+          error: `Invalid phone number format. Tried countries: ${attemptedCountries || 'various'}`,
           formatValid: false,
-          country: providedCountry || detectedCountry,
           parseAttempts,
-          suggestedCountry: detectedCountry !== providedCountry ? detectedCountry : null
+          confidence
         }, clientId);
       }
+      
+      // Calculate confidence
+      const confidence = this.calculateConfidence(phoneNumber, parseAttempts, {
+        providedCountry,
+        detectedMethod,
+        originalHasPlus,
+        requiredPrefixAdd,
+        multipleValidCountries: validCountries.length > 1
+      });
       
       // Extract phone details
       const phoneDetails = {
@@ -406,7 +360,8 @@ class PhoneValidationService {
         isPossible: phoneNumber.isPossible(),
         uri: phoneNumber.getURI(),
         parseAttempts,
-        providedCountryWasWrong: providedCountry && providedCountry !== successfulCountry
+        confidence,
+        validInCountries: validCountries.length > 0 ? validCountries : [successfulCountry]
       };
       
       // For FIXED_LINE_OR_MOBILE, default to mobile for common mobile countries
@@ -422,12 +377,6 @@ class PhoneValidationService {
       
       const result = this.buildValidationResult(phone, phoneDetails, clientId);
       
-      // Add warning if country was corrected
-      if (phoneDetails.providedCountryWasWrong) {
-        result.warning = `Phone number is from ${phoneDetails.countryName}, not ${this.getCountryName(providedCountry)}`;
-        result.correctedCountry = phoneDetails.country;
-      }
-      
       // Save to cache if valid
       if (useCache && result.valid) {
         await this.savePhoneCache(phone, result, clientId);
@@ -438,47 +387,23 @@ class PhoneValidationService {
     } catch (error) {
       this.logger.error('Phone parsing failed', { phone, error: error.message });
       
-      // Handle specific parse errors
-      if (error instanceof ParseError) {
-        let errorMessage = 'Invalid phone number';
-        
-        switch (error.message) {
-          case 'INVALID_COUNTRY':
-            errorMessage = 'Invalid country code';
-            break;
-          case 'TOO_SHORT':
-            errorMessage = 'Phone number is too short';
-            break;
-          case 'TOO_LONG':
-            errorMessage = 'Phone number is too long';
-            break;
-          case 'NOT_A_NUMBER':
-            errorMessage = 'Not a valid phone number';
-            break;
-        }
-        
-        return this.buildValidationResult(phone, {
-          valid: false,
-          error: errorMessage,
-          formatValid: false,
-          parseError: error.message,
-          country: providedCountry || detectedCountry,
-          parseAttempts
-        }, clientId);
-      }
+      const confidence = this.calculateConfidence(null, parseAttempts, {
+        providedCountry,
+        detectedMethod: 'error',
+        originalHasPlus
+      });
       
-      // Generic error
       return this.buildValidationResult(phone, {
         valid: false,
         error: 'Failed to validate phone number',
         formatValid: false,
-        country: providedCountry || detectedCountry,
-        parseAttempts
+        parseAttempts,
+        confidence
       }, clientId);
     }
   }
   
-  // Clean phone number
+  // Clean phone number - simplified
   cleanPhoneNumber(phone) {
     // Convert to string and trim
     let cleaned = String(phone).trim();
@@ -489,22 +414,13 @@ class PhoneValidationService {
     // Remove extension markers and everything after
     cleaned = cleaned.replace(/(?:ext|extension|x|ext\.|extn|extn\.|#)[\s\.\-:#]?[\d]+$/i, '');
     
-    // Handle various international prefixes
+    // Handle various international prefixes by converting to +
     if (cleaned.startsWith('00')) {
-      // International prefix used in many countries
       cleaned = '+' + cleaned.substring(2);
     } else if (cleaned.startsWith('011')) {
-      // US international prefix
       cleaned = '+' + cleaned.substring(3);
     } else if (cleaned.startsWith('0011')) {
-      // Australian international prefix
       cleaned = '+' + cleaned.substring(4);
-    } else if (cleaned.startsWith('010')) {
-      // Japanese international prefix
-      cleaned = '+' + cleaned.substring(3);
-    } else if (cleaned.startsWith('009')) {
-      // Nigerian international prefix
-      cleaned = '+' + cleaned.substring(3);
     }
     
     // Handle letters in phone numbers (like 1-800-FLOWERS)
@@ -538,7 +454,7 @@ class PhoneValidationService {
       'DE': 'Germany',
       'FR': 'France',
       'PH': 'Philippines',
-      'PG': 'Papua New Guinea', // This was missing!
+      'PG': 'Papua New Guinea',
       'IN': 'India',
       'JP': 'Japan',
       'CN': 'China',
@@ -627,6 +543,13 @@ class PhoneValidationService {
     const countryCode = validationData.country || null;
     const countryName = countryCode ? this.getCountryName(countryCode) : '';
     
+    // Get confidence - either passed in or calculate a basic one
+    const confidence = validationData.confidence || {
+      score: isValid ? 50 : 0,
+      level: isValid ? 'medium' : 'none',
+      factors: isValid ? ['basic_valid'] : ['invalid']
+    };
+    
     const result = {
       originalPhone,
       currentPhone: validationData.e164 || this.cleanPhoneNumber(originalPhone),
@@ -638,8 +561,8 @@ class PhoneValidationService {
       // Phone type
       type: validationData.type || 'UNKNOWN',
       
-      // Location info
-      location: validationData.countryName || countryName,
+      // Location info - only show if we have a country
+      location: countryName || 'Unknown',
       carrier: '', // Would need external service for carrier lookup
       
       // Phone formats
@@ -652,21 +575,32 @@ class PhoneValidationService {
       countryCode: countryCode,
       countryCallingCode: validationData.countryCode || null,
       
-      // Additional details
-      confidence: isValid ? 'high' : 'low',
+      // Confidence details
+      confidence: confidence.level,
+      confidenceScore: confidence.score,
+      confidenceFactors: confidence.factors,
       
       // Unmessy fields - ensure country name not code
       um_phone: validationData.international || validationData.e164 || originalPhone,
       um_phone_status: wasChanged ? 'Changed' : 'Unchanged',
       um_phone_format: formatValid ? 'Valid' : 'Invalid',
       um_phone_country_code: countryCode || '',
-      um_phone_country: countryName, // This should be the NAME not CODE
+      um_phone_country: countryName,
       um_phone_is_mobile: validationData.isMobile || false,
       
       // Debug info
-      detectedCountry: countryCode,
+      detectedCountry: validationData.country,
       parseError: validationData.parseError || null
     };
+    
+    // Add additional details if available
+    if (validationData.parseAttempts) {
+      result.parseAttempts = validationData.parseAttempts;
+    }
+    
+    if (validationData.validInCountries) {
+      result.validInCountries = validationData.validInCountries;
+    }
     
     return result;
   }
@@ -698,7 +632,9 @@ class PhoneValidationService {
           uri: `tel:${data.e164}`,
           countryCode: data.country,
           countryCallingCode: data.country_code,
-          confidence: 'high',
+          confidence: 'high', // Cached results have high confidence
+          confidenceScore: 90,
+          confidenceFactors: ['cached_result', 'previously_validated'],
           um_phone: data.international_format,
           um_phone_status: data.original_phone !== data.international_format ? 'Changed' : 'Unchanged',
           um_phone_format: 'Valid',
@@ -733,11 +669,14 @@ class PhoneValidationService {
         phone_type: validationResult.type,
         is_mobile: validationResult.um_phone_is_mobile,
         valid: validationResult.valid,
+        confidence_score: validationResult.confidenceScore,
+        confidence_level: validationResult.confidence,
         client_id: clientId
       });
       
       this.logger.debug('Phone validation saved to cache', { 
         phone: validationResult.e164,
+        confidence: validationResult.confidence,
         clientId 
       });
     } catch (error) {
