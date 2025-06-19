@@ -10,7 +10,7 @@ import {
   getCountries, 
   ParseError 
 } from 'libphonenumber-js';
-import countryMappings from './data/country-mappings.json';
+import countryMappings from './data/country-mappings.json' assert { type: 'json' };
 
 const logger = createServiceLogger('phone-validation-service');
 
