@@ -83,25 +83,34 @@ router.get('/queue-processor',
     try {
       logger.info('Starting scheduled queue operations', { operations });
       
-      // Import the queue worker modules dynamically
-      const queueProcessor = await import('../../services/workers/queue-processor.js');
-      const queueMonitor = await import('../../services/workers/queue-monitor.js');
+      // Import the queue service
+      const queueService = (await import('../../services/queue-service.js')).default;
       
       // Run requested operations
       for (const op of operations) {
         switch (op) {
           case 'process':
-            results.process = await queueProcessor.processQueueBatch(limit);
+            // Process pending items
+            results.process = await queueService.processPendingItems({
+              batchSize: limit
+            });
             break;
+            
           case 'monitor':
-            results.monitor = await queueMonitor.checkQueueStatus();
+            // Check queue status with alerts
+            results.monitor = await queueService.checkQueueStatus();
             break;
+            
           case 'reset-stalled':
-            results.resetStalled = await queueMonitor.resetStalledItems();
+            // Reset stalled items
+            results.resetStalled = await queueService.resetStalledItems();
             break;
+            
           case 'cleanup':
-            results.cleanup = await queueMonitor.cleanupCompletedItems();
+            // Clean up old completed items
+            results.cleanup = await queueService.cleanupCompletedItems();
             break;
+            
           default:
             logger.warn(`Unknown queue operation: ${op}`);
         }
@@ -180,16 +189,22 @@ router.get('/clean-old-logs',
       const daysToKeep = parseInt(req.query.days) || 30;
       
       // Clean up old API request logs
-      const { rowCount: apiLogsDeleted } = await db.query(`
-        DELETE FROM api_request_logs
-        WHERE created_at < NOW() - INTERVAL '${daysToKeep} days'
-      `);
+      const apiLogsResult = await db.query(
+        `DELETE FROM api_request_logs
+         WHERE created_at < NOW() - INTERVAL $1
+         RETURNING id`,
+        [`${daysToKeep} days`]
+      );
+      const apiLogsDeleted = apiLogsResult.rowCount || 0;
       
       // Clean up old validation metrics
-      const { rowCount: metricsDeleted } = await db.query(`
-        DELETE FROM validation_metrics
-        WHERE date < CURRENT_DATE - INTERVAL '${daysToKeep} days'
-      `);
+      const metricsResult = await db.query(
+        `DELETE FROM validation_metrics
+         WHERE date < CURRENT_DATE - INTERVAL $1
+         RETURNING id`,
+        [`${daysToKeep} days`]
+      );
+      const metricsDeleted = metricsResult.rowCount || 0;
       
       const result = {
         apiLogsDeleted,

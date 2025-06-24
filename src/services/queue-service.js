@@ -10,6 +10,7 @@ import {
 import validationService from './validation-service.js';
 import clientService from './client-service.js';
 import { hubspotService } from './external/hubspot.js';
+import { triggerAlert, ALERT_TYPES } from '../monitoring/alerts.js';
 
 const logger = createServiceLogger('queue-service');
 
@@ -804,6 +805,138 @@ class QueueService {
     } catch (error) {
       this.logger.error('Failed to get queue stats', error);
       throw new QueueError('Failed to retrieve queue statistics', error);
+    }
+  }
+  
+  /**
+   * Check queue status with alerting
+   * Enhanced version of getQueueStats with alert functionality
+   */
+  async checkQueueStatus() {
+    try {
+      this.logger.debug('Checking queue status');
+      
+      // Query for queue stats
+      const { rows } = await db.query(`
+        SELECT 
+          status, 
+          COUNT(*) as count,
+          MAX(EXTRACT(EPOCH FROM (NOW() - created_at))) as oldest_seconds
+        FROM hubspot_webhook_queue
+        GROUP BY status
+      `);
+      
+      // Process results
+      const stats = {
+        pending: 0,
+        processing: 0,
+        completed: 0,
+        failed: 0,
+        oldest: 0,
+        timestamp: new Date().toISOString()
+      };
+      
+      rows.forEach(row => {
+        stats[row.status.toLowerCase()] = parseInt(row.count);
+        if (row.oldest_seconds > stats.oldest) {
+          stats.oldest = row.oldest_seconds;
+        }
+      });
+      
+      // Check for backed up queue
+      const pendingThreshold = config.queue?.pendingThreshold || 100;
+      if (stats.pending > pendingThreshold) {
+        triggerAlert(ALERT_TYPES.APPLICATION.QUEUE_BACKED_UP, {
+          pendingCount: stats.pending,
+          threshold: pendingThreshold
+        });
+      }
+      
+      // Check for stalled items
+      const stalledThresholdHours = config.queue?.stalledThresholdHours || 1;
+      const stalledThresholdSeconds = stalledThresholdHours * 3600;
+      if (stats.processing > 0 && stats.oldest > stalledThresholdSeconds) {
+        triggerAlert(ALERT_TYPES.APPLICATION.QUEUE_PROCESSING_ERROR, {
+          processingCount: stats.processing,
+          oldestHours: Math.round(stats.oldest / 3600 * 10) / 10
+        });
+      }
+      
+      // Check for failed items
+      if (stats.failed > 0) {
+        this.logger.warn(`Queue has ${stats.failed} failed items`);
+      }
+      
+      this.logger.info('Queue status check completed', stats);
+      return stats;
+      
+    } catch (error) {
+      this.logger.error('Error checking queue status', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Reset stalled queue items
+   */
+  async resetStalledItems() {
+    try {
+      this.logger.info('Resetting stalled queue items');
+      
+      const stalledThresholdMinutes = config.queue?.stalledThresholdMinutes || 30;
+      
+      // Find and reset stalled items
+      const { rowCount } = await db.query(
+        `UPDATE hubspot_webhook_queue
+         SET 
+           status = 'pending',
+           processing_started_at = NULL,
+           next_retry_at = NOW(),
+           attempts = attempts + 1
+         WHERE 
+           status = 'processing'
+           AND processing_started_at < NOW() - INTERVAL $1
+           AND attempts < max_attempts`,
+        [`${stalledThresholdMinutes} minutes`]
+      );
+      
+      this.logger.info(`Reset ${rowCount} stalled queue items`);
+      
+      return {
+        resetCount: rowCount || 0
+      };
+    } catch (error) {
+      this.logger.error('Error resetting stalled queue items', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Clean up old completed queue items
+   */
+  async cleanupCompletedItems() {
+    try {
+      this.logger.info('Cleaning up old completed queue items');
+      
+      const retentionDays = config.queue?.completedRetentionDays || 30;
+      
+      // Delete old completed items
+      const { rowCount } = await db.query(
+        `DELETE FROM hubspot_webhook_queue
+         WHERE 
+           status = 'completed'
+           AND processing_completed_at < NOW() - INTERVAL $1`,
+        [`${retentionDays} days`]
+      );
+      
+      this.logger.info(`Cleaned up ${rowCount} old completed queue items`);
+      
+      return {
+        deletedCount: rowCount || 0
+      };
+    } catch (error) {
+      this.logger.error('Error cleaning up completed queue items', error);
+      throw error;
     }
   }
   
