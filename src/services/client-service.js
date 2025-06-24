@@ -3,10 +3,9 @@ import db from '../core/db.js';
 import { config } from '../core/config.js';
 import { createServiceLogger } from '../core/logger.js';
 import { 
-  AuthenticationError, 
-  RateLimitError, 
-  DatabaseError,
-  ValidationError 
+  DatabaseError, 
+  ValidationError,
+  RateLimitError 
 } from '../core/errors.js';
 
 const logger = createServiceLogger('client-service');
@@ -14,107 +13,131 @@ const logger = createServiceLogger('client-service');
 class ClientService {
   constructor() {
     this.logger = logger;
-    
-    // Cache for client data (TTL: 5 minutes)
     this.clientCache = new Map();
-    this.cacheTTL = 5 * 60 * 1000; // 5 minutes
-    
-    // Cache for API key mappings
-    this.apiKeyCache = new Map();
-    
-    // Initialize API keys from environment on startup
-    this.loadApiKeysFromEnv();
+    this.clientConfigCache = new Map();
+    this.cacheTimeout = 300000; // 5 minutes
   }
   
-  // Load API keys from environment variables
-  loadApiKeysFromEnv() {
+  // Get client by ID
+  async getClient(clientId) {
     try {
-      const clients = config.clients.getAll();
-      
-      for (const [apiKey, clientId] of clients) {
-        this.apiKeyCache.set(apiKey, clientId);
-        this.logger.info('API key loaded for client', { clientId });
+      // Check cache first
+      const cacheKey = `client:${clientId}`;
+      const cached = this.getFromCache(cacheKey);
+      if (cached) {
+        return cached;
       }
       
-      this.logger.info('API keys loaded from environment', {
-        totalKeys: this.apiKeyCache.size
-      });
-    } catch (error) {
-      this.logger.error('Failed to load API keys from environment', error);
-    }
-  }
-  
-  // Validate API key and return client ID
-  async validateApiKey(apiKey) {
-    if (!apiKey) {
-      return {
-        valid: false,
-        error: 'API key is required'
-      };
-    }
-    
-    // Check memory cache first
-    const cachedClientId = this.apiKeyCache.get(apiKey);
-    if (!cachedClientId) {
-      return {
-        valid: false,
-        error: 'Invalid API key'
-      };
-    }
-    
-    return {
-      valid: true,
-      clientId: cachedClientId
-    };
-  }
-  
-  // Get client by ID with caching
-  async getClient(clientId) {
-    // Check cache first
-    const cached = this.getFromCache(clientId);
-    if (cached) {
-      return cached;
-    }
-    
-    try {
-      // Use Supabase query
+      // Query database
       const { rows } = await db.select('clients', 
         { client_id: clientId },
         { limit: 1 }
       );
       
+      if (rows.length === 0) {
+        this.logger.warn('Client not found', { clientId });
+        return null;
+      }
+      
       const client = rows[0];
       
-      if (client) {
-        // Add to cache
-        this.addToCache(clientId, client);
-      }
+      // Cache the result
+      this.setInCache(cacheKey, client);
       
       return client;
     } catch (error) {
       this.logger.error('Failed to get client', error, { clientId });
-      throw new DatabaseError('Failed to retrieve client data', 'select', error);
+      throw new DatabaseError('Failed to retrieve client', 'select', error);
     }
   }
   
-  // Get client HubSpot configuration
-  async getClientHubSpotConfig(clientId) {
+  // Get client by API key
+  async getClientByApiKey(apiKey) {
     try {
-      const client = await this.getClient(clientId);
+      // Check if API key matches any configured client
+      const clientEntry = config.clients.getByKey(apiKey);
       
-      if (!client) {
+      if (!clientEntry) {
+        this.logger.warn('Invalid API key attempted', { 
+          keyPrefix: apiKey ? apiKey.substring(0, 8) + '...' : 'null' 
+        });
         return null;
       }
       
-      return {
-        enabled: client.hubspot_enabled,
-        apiKey: client.hubspot_private_key,
-        portalId: client.hubspot_portal_id,
-        formGuid: client.hubspot_form_guid,
-        webhookSecret: client.hubspot_webhook_secret
-      };
+      // Get full client data from database
+      const client = await this.getClient(clientEntry.id);
+      
+      if (!client) {
+        this.logger.error('Client configured but not found in database', {
+          clientId: clientEntry.id
+        });
+        return null;
+      }
+      
+      // Verify client is active
+      if (!client.active) {
+        this.logger.warn('Inactive client attempted access', {
+          clientId: client.client_id,
+          name: client.name
+        });
+        return null;
+      }
+      
+      return client;
     } catch (error) {
-      this.logger.error('Failed to get HubSpot config', error, { clientId });
+      this.logger.error('Failed to get client by API key', error);
+      throw new DatabaseError('Failed to authenticate client', 'select', error);
+    }
+  }
+  
+  // Check if client has HubSpot enabled
+  async hasHubSpotEnabled(clientId) {
+    try {
+      const client = await this.getClient(clientId);
+      return client?.hubspot_enabled || false;
+    } catch (error) {
+      this.logger.error('Failed to check HubSpot status', error, { clientId });
+      return false;
+    }
+  }
+  
+  // Get client's HubSpot configuration
+  async getClientHubSpotConfig(clientId) {
+    try {
+      // Check cache first
+      const cacheKey = `hubspot:${clientId}`;
+      const cached = this.getFromCache(cacheKey);
+      if (cached) {
+        return cached;
+      }
+      
+      const { rows } = await db.select('clients',
+        { client_id: clientId },
+        {
+          columns: 'client_id, hubspot_enabled, hubspot_private_key, hubspot_portal_id, hubspot_form_guid, hubspot_webhook_secret',
+          limit: 1
+        }
+      );
+      
+      if (rows.length === 0) {
+        return null;
+      }
+      
+      const data = rows[0];
+      const config = {
+        apiKey: data.hubspot_private_key,
+        portalId: data.hubspot_portal_id,
+        formGuid: data.hubspot_form_guid,
+        webhookSecret: data.hubspot_webhook_secret,
+        enabled: data.hubspot_enabled
+      };
+      
+      // Cache the configuration
+      this.setInCache(cacheKey, config);
+      
+      return config;
+    } catch (error) {
+      this.logger.error('Failed to get client HubSpot config', error, { clientId });
       return null;
     }
   }
@@ -166,13 +189,13 @@ class ClientService {
   // Increment usage counter (atomic operation)
   async incrementUsage(clientId, validationType, count = 1) {
     try {
-      // Use the decrement function from database
+      // Use the decrement function from database via RPC
       const { rows } = await db.query('decrement_validation_count', {
         p_client_id: clientId,
         p_validation_type: validationType
       });
       
-      const remaining = rows?.[0] || -1;
+      const remaining = rows?.[0]?.result ?? rows?.[0] ?? -1;
       
       if (remaining === -1) {
         this.logger.warn('Failed to decrement rate limit', {
@@ -281,22 +304,25 @@ class ClientService {
     try {
       const allowedUpdates = [
         'name', 'active', 'daily_email_limit', 'daily_name_limit',
-        'daily_phone_limit', 'daily_address_limit', 'hubspot_enabled',
-        'hubspot_private_key', 'hubspot_portal_id', 'hubspot_form_guid',
-        'hubspot_webhook_secret', 'is_admin'
+        'daily_phone_limit', 'daily_address_limit', 'um_account_type',
+        'hubspot_enabled', 'hubspot_private_key', 'hubspot_portal_id',
+        'hubspot_form_guid', 'hubspot_webhook_secret'
       ];
       
-      // Filter to allowed fields only
+      // Filter out any disallowed fields
       const filteredUpdates = {};
-      for (const [key, value] of Object.entries(updates)) {
+      Object.keys(updates).forEach(key => {
         if (allowedUpdates.includes(key)) {
-          filteredUpdates[key] = value;
+          filteredUpdates[key] = updates[key];
         }
-      }
+      });
       
       if (Object.keys(filteredUpdates).length === 0) {
-        throw new ValidationError('No valid update fields provided');
+        throw new ValidationError('No valid fields to update');
       }
+      
+      // Add updated_at timestamp
+      filteredUpdates.updated_at = new Date().toISOString();
       
       const { rows } = await db.update(
         'clients',
@@ -305,235 +331,105 @@ class ClientService {
         { returning: true }
       );
       
-      const result = rows[0];
+      if (rows.length === 0) {
+        throw new DatabaseError('Client not found');
+      }
       
       // Invalidate cache
       this.invalidateCache(clientId);
       
-      this.logger.info('Client updated', {
-        clientId,
-        updates: Object.keys(filteredUpdates)
-      });
+      this.logger.info('Client updated', { clientId, updates: Object.keys(filteredUpdates) });
       
-      return result;
+      return rows[0];
     } catch (error) {
       this.logger.error('Failed to update client', error, { clientId });
       throw new DatabaseError('Failed to update client', 'update', error);
     }
   }
   
-  // Create a new client
-  async createClient(clientData) {
+  // Reset daily limits for all clients
+  async resetDailyLimits() {
     try {
-      // Generate a new client ID (you might want to implement a better ID generation strategy)
-      const maxIdResult = await db.query('SELECT MAX(client_id) as max_id FROM clients');
-      const newClientId = (maxIdResult.rows[0]?.max_id || 0) + 1;
-      
-      const newClient = {
-        client_id: newClientId,
-        name: clientData.name,
-        active: clientData.active !== undefined ? clientData.active : true,
-        daily_email_limit: clientData.daily_email_limit || 1000,
-        daily_name_limit: clientData.daily_name_limit || 1000,
-        daily_phone_limit: clientData.daily_phone_limit || 1000,
-        daily_address_limit: clientData.daily_address_limit || 1000,
-        remaining_email: clientData.daily_email_limit || 1000,
-        remaining_name: clientData.daily_name_limit || 1000,
-        remaining_phone: clientData.daily_phone_limit || 1000,
-        remaining_address: clientData.daily_address_limit || 1000,
-        hubspot_enabled: clientData.hubspot_enabled || false,
-        hubspot_private_key: clientData.hubspot_private_key || null,
-        hubspot_portal_id: clientData.hubspot_portal_id || null,
-        hubspot_form_guid: clientData.hubspot_form_guid || null,
-        hubspot_webhook_secret: clientData.hubspot_webhook_secret || null,
-        is_admin: clientData.is_admin || false
-      };
-      
-      const { rows } = await db.insert('clients', newClient, { returning: true });
-      
-      this.logger.info('Client created', {
-        clientId: newClientId,
-        name: clientData.name
-      });
-      
-      return rows[0];
-    } catch (error) {
-      this.logger.error('Failed to create client', error);
-      throw new DatabaseError('Failed to create client', 'insert', error);
-    }
-  }
-  
-  // Deactivate a client (soft delete)
-  async deactivateClient(clientId) {
-    try {
-      const { rows } = await db.update(
-        'clients',
-        { active: false },
-        { client_id: clientId },
-        { returning: true }
-      );
-      
-      if (rows.length === 0) {
-        return null;
-      }
-      
-      // Invalidate cache
-      this.invalidateCache(clientId);
-      
-      this.logger.info('Client deactivated', { clientId });
-      
-      return rows[0];
-    } catch (error) {
-      this.logger.error('Failed to deactivate client', error, { clientId });
-      throw new DatabaseError('Failed to deactivate client', 'update', error);
-    }
-  }
-  
-  // List all clients with pagination
-  async listClients(page = 1, limit = 20) {
-    try {
-      const offset = (page - 1) * limit;
-      
-      // Get total count
-      const countResult = await db.query('SELECT COUNT(*) as total FROM clients');
-      const total = parseInt(countResult.rows[0].total);
-      
-      // Get paginated results
-      const { rows } = await db.query(
-        `SELECT * FROM clients 
-         ORDER BY client_id ASC 
-         LIMIT $1 OFFSET $2`,
-        [limit, offset]
-      );
-      
-      return {
-        clients: rows,
-        pagination: {
-          page,
-          limit,
-          total,
-          pages: Math.ceil(total / limit)
-        }
-      };
-    } catch (error) {
-      this.logger.error('Failed to list clients', error);
-      throw new DatabaseError('Failed to list clients', 'select', error);
-    }
-  }
-  
-  // Get count of HubSpot enabled clients
-  async getHubSpotEnabledClientsCount() {
-    try {
-      const { rows } = await db.query(
-        'SELECT COUNT(*) as count FROM clients WHERE hubspot_enabled = true AND active = true'
-      );
-      return parseInt(rows[0].count);
-    } catch (error) {
-      this.logger.error('Failed to count HubSpot enabled clients', error);
-      return 0;
-    }
-  }
-  
-  // Reset rate limits for a specific client
-  async resetRateLimits(clientId) {
-    try {
-      const client = await this.getClient(clientId);
-      if (!client) {
-        return null;
-      }
-      
-      const { rows } = await db.update(
-        'clients',
-        {
-          remaining_email: client.daily_email_limit,
-          remaining_name: client.daily_name_limit,
-          remaining_phone: client.daily_phone_limit,
-          remaining_address: client.daily_address_limit,
-          last_reset_date: new Date()
-        },
-        { client_id: clientId },
-        { returning: true }
-      );
-      
-      // Invalidate cache
-      this.invalidateCache(clientId);
-      
-      this.logger.info('Rate limits reset for client', { clientId });
-      
-      return rows[0];
-    } catch (error) {
-      this.logger.error('Failed to reset rate limits', error, { clientId });
-      throw new DatabaseError('Failed to reset rate limits', 'update', error);
-    }
-  }
-  
-  // Reset all client rate limits (called by cron job)
-  async resetAllRateLimits() {
-    try {
-      const { rowCount } = await db.query('SELECT reset_remaining_counts()');
+      // Call the stored procedure to reset limits
+      await db.rpc('reset_remaining_counts');
       
       // Clear all caches
-      this.clearCaches();
+      this.clientCache.clear();
+      this.clientConfigCache.clear();
       
-      this.logger.info('All client rate limits reset', { count: rowCount });
+      this.logger.info('Daily limits reset for all clients');
       
-      return { count: rowCount };
+      return { success: true };
     } catch (error) {
-      this.logger.error('Failed to reset all rate limits', error);
-      throw new DatabaseError('Failed to reset all rate limits', 'function', error);
+      this.logger.error('Failed to reset daily limits', error);
+      throw new DatabaseError('Failed to reset daily limits', 'update', error);
+    }
+  }
+  
+  // Get all active clients
+  async getAllActiveClients() {
+    try {
+      const { rows } = await db.select('clients',
+        { active: true },
+        {
+          columns: 'client_id, name, um_account_type, daily_email_limit, remaining_email, daily_name_limit, remaining_name, daily_phone_limit, remaining_phone, daily_address_limit, remaining_address, created_at',
+          order: { column: 'client_id', ascending: true }
+        }
+      );
+      
+      return rows;
+    } catch (error) {
+      this.logger.error('Failed to get all clients', error);
+      throw new DatabaseError('Failed to retrieve clients', 'select', error);
     }
   }
   
   // Cache management methods
-  getFromCache(clientId) {
-    const cached = this.clientCache.get(clientId);
-    if (!cached) return null;
-    
-    // Check if expired
-    if (Date.now() - cached.timestamp > this.cacheTTL) {
-      this.clientCache.delete(clientId);
-      return null;
+  getFromCache(key) {
+    const cached = this.clientCache.get(key);
+    if (cached && (Date.now() - cached.timestamp < this.cacheTimeout)) {
+      return cached.data;
     }
-    
-    return cached.data;
+    this.clientCache.delete(key);
+    return null;
   }
   
-  addToCache(clientId, data) {
-    this.clientCache.set(clientId, {
+  setInCache(key, data) {
+    this.clientCache.set(key, {
       data,
       timestamp: Date.now()
     });
   }
   
   invalidateCache(clientId) {
-    this.clientCache.delete(clientId);
-  }
-  
-  // Clear all caches
-  clearCaches() {
-    this.clientCache.clear();
-    this.logger.info('Client cache cleared');
+    // Remove all cache entries for this client
+    const keysToDelete = [];
+    for (const key of this.clientCache.keys()) {
+      if (key.includes(clientId)) {
+        keysToDelete.push(key);
+      }
+    }
+    keysToDelete.forEach(key => this.clientCache.delete(key));
+    
+    // Also clear from config cache
+    this.clientConfigCache.delete(clientId);
   }
   
   // Health check
   async healthCheck() {
     try {
-      // Try to get a client to test DB connection
-      const testResult = await db.select('clients', { client_id: '1' }, { limit: 1 });
+      // Try to get a client to verify database connection
+      const { rows } = await db.select('clients', {}, { limit: 1 });
       
       return {
         status: 'healthy',
-        cacheSize: this.clientCache.size,
-        apiKeysLoaded: this.apiKeyCache.size,
-        dbConnected: true
+        clientCount: rows.length,
+        cacheSize: this.clientCache.size
       };
     } catch (error) {
       return {
         status: 'unhealthy',
-        error: error.message,
-        cacheSize: this.clientCache.size,
-        apiKeysLoaded: this.apiKeyCache.size,
-        dbConnected: false
+        error: error.message
       };
     }
   }

@@ -186,16 +186,50 @@ export const db = {
   },
   
   /**
-   * Execute a SQL query with parameters
-   * Note: Supabase JS client doesn't support raw SQL, so we need to handle specific cases
-   * or create RPC functions for complex queries
-   * @param {string} text - SQL query text
-   * @param {Array} params - Query parameters
+   * Execute a SQL query with parameters or call a stored function
+   * @param {string} textOrFunction - SQL query text or function name
+   * @param {Array|Object} params - Query parameters or function arguments
    * @returns {Promise<Object>} Query result
    */
-  query: async (text, params = []) => {
+  query: async (textOrFunction, params = []) => {
     return db.executeWithRetry(async (supabase) => {
-      // Handle specific query patterns used in the application
+      // Check if this is a function call (no spaces, SELECT, UPDATE, etc.)
+      const isFunction = !textOrFunction.includes(' ') && 
+                        !textOrFunction.toUpperCase().includes('SELECT') &&
+                        !textOrFunction.toUpperCase().includes('UPDATE') &&
+                        !textOrFunction.toUpperCase().includes('INSERT') &&
+                        !textOrFunction.toUpperCase().includes('DELETE');
+      
+      // Handle RPC function calls
+      if (isFunction) {
+        logger.debug('Executing RPC function', { function: textOrFunction, params });
+        
+        try {
+          const { data, error } = await supabase.rpc(textOrFunction, params);
+          
+          if (error) throw error;
+          
+          // Format response to match expected structure
+          // If data is a single value, wrap it in an array of objects
+          let rows;
+          if (Array.isArray(data)) {
+            rows = data;
+          } else if (data !== null && data !== undefined) {
+            // Single value returned - wrap it
+            rows = [{ result: data }];
+          } else {
+            rows = [];
+          }
+          
+          return { rows, rowCount: rows.length };
+        } catch (error) {
+          logger.error('RPC function call failed', error, { function: textOrFunction });
+          throw error;
+        }
+      }
+      
+      // Handle specific SQL query patterns
+      const text = textOrFunction;
       
       // 1. Queue status query with GROUP BY
       if (text.includes('hubspot_webhook_queue') && text.includes('GROUP BY status')) {
@@ -226,73 +260,54 @@ export const db = {
           ? Math.floor((Date.now() - oldestCreatedAt.getTime()) / 1000)
           : 0;
         
-        // Format as expected
-        const rows = Array.from(statusMap.entries()).map(([status, count]) => ({
-          status,
-          count: count.toString(),
-          oldest_seconds: oldestSeconds.toString()
-        }));
+        // Convert map to array of rows
+        const rows = [];
+        statusMap.forEach((count, status) => {
+          rows.push({
+            status,
+            count: count.toString(),
+            oldest_seconds: oldestSeconds
+          });
+        });
         
-        return { rows, rowCount: rows.length };
+        return {
+          rows: rows.length > 0 ? rows : [{ status: 'empty', count: '0', oldest_seconds: 0 }],
+          rowCount: rows.length || 1
+        };
       }
       
-      // 2. DELETE with WHERE clause
-      if (text.toLowerCase().startsWith('delete from')) {
-        const tableMatch = text.match(/delete\s+from\s+(\w+)/i);
-        if (!tableMatch) throw new Error('Invalid DELETE query');
+      // 2. Simple SELECT with LIMIT and OFFSET
+      if (text.toLowerCase().includes('select * from')) {
+        const tableMatch = text.match(/from\s+(\w+)/i);
+        const whereMatch = text.match(/where\s+(\w+)\s*=\s*\$1/i);
+        const limitMatch = text.match(/limit\s+\$(\d+)/i);
+        const offsetMatch = text.match(/offset\s+\$(\d+)/i);
         
-        const tableName = tableMatch[1];
-        let query = supabase.from(tableName).delete();
-        
-        // Handle WHERE clauses
-        if (text.toLowerCase().includes('where')) {
-          // Handle simple WHERE clauses with parameters
-          if (params.length > 0) {
-            // Extract column name from WHERE clause
-            const whereMatch = text.match(/where\s+(\w+)\s*=\s*\$1/i);
-            if (whereMatch) {
-              query = query.eq(whereMatch[1], params[0]);
-            } else {
-              // Handle more complex WHERE clauses
-              const conditionMatch = text.match(/where\s+(.+?)(?:\s+returning|$)/i);
-              if (conditionMatch) {
-                const condition = conditionMatch[1];
-                
-                // Handle date comparisons
-                if (condition.includes('<') && condition.includes('INTERVAL')) {
-                  const columnMatch = condition.match(/(\w+)\s*<\s*NOW\(\)\s*-\s*INTERVAL/i);
-                  if (columnMatch) {
-                    const intervalMatch = params[0].match(/(\d+)\s*(\w+)/);
-                    if (intervalMatch) {
-                      const [, amount, unit] = intervalMatch;
-                      const date = new Date();
-                      
-                      // Calculate the date based on interval
-                      if (unit.toLowerCase().includes('day')) {
-                        date.setDate(date.getDate() - parseInt(amount));
-                      } else if (unit.toLowerCase().includes('minute')) {
-                        date.setMinutes(date.getMinutes() - parseInt(amount));
-                      } else if (unit.toLowerCase().includes('hour')) {
-                        date.setHours(date.getHours() - parseInt(amount));
-                      }
-                      
-                      query = query.lt(columnMatch[1], date.toISOString());
-                    }
-                  }
-                }
-              }
-            }
+        if (tableMatch) {
+          let query = supabase.from(tableMatch[1]).select('*');
+          
+          if (whereMatch && params.length > 0) {
+            query = query.eq(whereMatch[1], params[0]);
           }
+          
+          if (limitMatch) {
+            const limitIndex = parseInt(limitMatch[1]) - 1;
+            query = query.limit(params[limitIndex]);
+          }
+          
+          if (offsetMatch) {
+            const offsetIndex = parseInt(offsetMatch[1]) - 1;
+            query = query.range(params[offsetIndex], params[offsetIndex] + (params[limitIndex - 1] || 20) - 1);
+          }
+          
+          const { data, error } = await query;
+          if (error) throw error;
+          
+          return {
+            rows: data || [],
+            rowCount: data ? data.length : 0
+          };
         }
-        
-        // Execute delete and get count
-        const { data, error, count } = await query.select('id');
-        if (error) throw error;
-        
-        return { 
-          rows: data || [], 
-          rowCount: data ? data.length : 0 
-        };
       }
       
       // 3. UPDATE with complex WHERE
@@ -360,31 +375,19 @@ export const db = {
         }
       }
       
-      // 5. SELECT with LIMIT and OFFSET
-      if (text.toLowerCase().includes('select * from')) {
-        const tableMatch = text.match(/from\s+(\w+)/i);
+      // 5. DELETE queries
+      if (text.toLowerCase().startsWith('delete from')) {
+        const tableMatch = text.match(/delete from\s+(\w+)/i);
         const whereMatch = text.match(/where\s+(\w+)\s*=\s*\$1/i);
-        const limitMatch = text.match(/limit\s+\$(\d+)/i);
-        const offsetMatch = text.match(/offset\s+\$(\d+)/i);
         
         if (tableMatch) {
-          let query = supabase.from(tableMatch[1]).select('*');
+          let query = supabase.from(tableMatch[1]).delete();
           
           if (whereMatch && params.length > 0) {
             query = query.eq(whereMatch[1], params[0]);
           }
           
-          if (limitMatch) {
-            const limitIndex = parseInt(limitMatch[1]) - 1;
-            query = query.limit(params[limitIndex]);
-          }
-          
-          if (offsetMatch) {
-            const offsetIndex = parseInt(offsetMatch[1]) - 1;
-            query = query.range(params[offsetIndex], params[offsetIndex] + (params[limitIndex - 1] || 20) - 1);
-          }
-          
-          const { data, error } = await query;
+          const { data, error } = await query.select('id');
           if (error) throw error;
           
           return {
@@ -551,6 +554,22 @@ export const db = {
         rows: data || [],
         rowCount: count || (data ? data.length : 0)
       };
+    });
+  },
+  
+  /**
+   * Call a stored procedure/function via RPC
+   * @param {string} functionName - Name of the database function
+   * @param {Object} args - Function arguments
+   * @returns {Promise<any>} Function result
+   */
+  rpc: async (functionName, args = {}) => {
+    return db.executeWithRetry(async (supabase) => {
+      const { data, error } = await supabase.rpc(functionName, args);
+      
+      if (error) throw error;
+      
+      return data;
     });
   },
   
