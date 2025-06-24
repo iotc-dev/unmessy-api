@@ -30,12 +30,12 @@ try {
 
 // Apply global middleware
 app.use(helmet({
-  contentSecurityPolicy: config.security.helmet.contentSecurityPolicy
+  contentSecurityPolicy: false // Disable CSP for API
 }));
 
 app.use(cors({
-  origin: config.security.corsOrigins,
-  credentials: config.security.corsCredentials
+  origin: config.security.corsOrigin,
+  credentials: true
 }));
 
 app.use(compression());
@@ -76,7 +76,6 @@ app.use(async (req, res, next) => {
 
 // Set up API routes
 app.use('/api/validate', validateRoutes);
-
 app.use('/api/hubspot', hubspotWebhookRoutes);
 app.use('/api/health', healthRoutes);
 app.use('/api/admin', adminRoutes);
