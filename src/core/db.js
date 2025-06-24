@@ -217,7 +217,19 @@ export const db = {
       
       // Apply options
       if (options.returning) {
-        query.select(options.returning === true ? '*' : options.returning);
+        let selectColumns;
+        
+        if (options.returning === true) {
+          selectColumns = '*';
+        } else if (Array.isArray(options.returning)) {
+          // Join array elements into a comma-separated string
+          selectColumns = options.returning.join(',');
+        } else {
+          // Assume it's already a string
+          selectColumns = options.returning;
+        }
+        
+        query.select(selectColumns);
       }
       
       const { data: result, error } = await query;
@@ -247,7 +259,19 @@ export const db = {
       
       // Apply options
       if (options.returning) {
-        query.select(options.returning === true ? '*' : options.returning);
+        let selectColumns;
+        
+        if (options.returning === true) {
+          selectColumns = '*';
+        } else if (Array.isArray(options.returning)) {
+          // Join array elements into a comma-separated string
+          selectColumns = options.returning.join(',');
+        } else {
+          // Assume it's already a string
+          selectColumns = options.returning;
+        }
+        
+        query.select(selectColumns);
       }
       
       const { data: result, error } = await query;
