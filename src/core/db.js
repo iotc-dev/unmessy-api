@@ -187,20 +187,215 @@ export const db = {
   
   /**
    * Execute a SQL query with parameters
-   * @param {string} text - SQL query text or function name for RPC
-   * @param {Array|Object} params - Query parameters
+   * Note: Supabase JS client doesn't support raw SQL, so we need to handle specific cases
+   * or create RPC functions for complex queries
+   * @param {string} text - SQL query text
+   * @param {Array} params - Query parameters
    * @returns {Promise<Object>} Query result
    */
   query: async (text, params = []) => {
     return db.executeWithRetry(async (supabase) => {
-      const { data, error, count } = await supabase.rpc(text, params);
+      // Handle specific query patterns used in the application
       
-      if (error) throw error;
+      // 1. Queue status query with GROUP BY
+      if (text.includes('hubspot_webhook_queue') && text.includes('GROUP BY status')) {
+        const { data, error } = await supabase
+          .from('hubspot_webhook_queue')
+          .select('status, created_at');
+        
+        if (error) throw error;
+        
+        // Process results to match expected format
+        const statusMap = new Map();
+        let oldestCreatedAt = null;
+        
+        data.forEach(row => {
+          // Count by status
+          const count = statusMap.get(row.status) || 0;
+          statusMap.set(row.status, count + 1);
+          
+          // Track oldest
+          const createdAt = new Date(row.created_at);
+          if (!oldestCreatedAt || createdAt < oldestCreatedAt) {
+            oldestCreatedAt = createdAt;
+          }
+        });
+        
+        // Calculate oldest in seconds
+        const oldestSeconds = oldestCreatedAt 
+          ? Math.floor((Date.now() - oldestCreatedAt.getTime()) / 1000)
+          : 0;
+        
+        // Format as expected
+        const rows = Array.from(statusMap.entries()).map(([status, count]) => ({
+          status,
+          count: count.toString(),
+          oldest_seconds: oldestSeconds.toString()
+        }));
+        
+        return { rows, rowCount: rows.length };
+      }
       
-      return {
-        rows: data || [],
-        rowCount: count || 0
-      };
+      // 2. DELETE with WHERE clause
+      if (text.toLowerCase().startsWith('delete from')) {
+        const tableMatch = text.match(/delete\s+from\s+(\w+)/i);
+        if (!tableMatch) throw new Error('Invalid DELETE query');
+        
+        const tableName = tableMatch[1];
+        let query = supabase.from(tableName).delete();
+        
+        // Handle WHERE clauses
+        if (text.toLowerCase().includes('where')) {
+          // Handle simple WHERE clauses with parameters
+          if (params.length > 0) {
+            // Extract column name from WHERE clause
+            const whereMatch = text.match(/where\s+(\w+)\s*=\s*\$1/i);
+            if (whereMatch) {
+              query = query.eq(whereMatch[1], params[0]);
+            } else {
+              // Handle more complex WHERE clauses
+              const conditionMatch = text.match(/where\s+(.+?)(?:\s+returning|$)/i);
+              if (conditionMatch) {
+                const condition = conditionMatch[1];
+                
+                // Handle date comparisons
+                if (condition.includes('<') && condition.includes('INTERVAL')) {
+                  const columnMatch = condition.match(/(\w+)\s*<\s*NOW\(\)\s*-\s*INTERVAL/i);
+                  if (columnMatch) {
+                    const intervalMatch = params[0].match(/(\d+)\s*(\w+)/);
+                    if (intervalMatch) {
+                      const [, amount, unit] = intervalMatch;
+                      const date = new Date();
+                      
+                      // Calculate the date based on interval
+                      if (unit.toLowerCase().includes('day')) {
+                        date.setDate(date.getDate() - parseInt(amount));
+                      } else if (unit.toLowerCase().includes('minute')) {
+                        date.setMinutes(date.getMinutes() - parseInt(amount));
+                      } else if (unit.toLowerCase().includes('hour')) {
+                        date.setHours(date.getHours() - parseInt(amount));
+                      }
+                      
+                      query = query.lt(columnMatch[1], date.toISOString());
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+        // Execute delete and get count
+        const { data, error, count } = await query.select('id');
+        if (error) throw error;
+        
+        return { 
+          rows: data || [], 
+          rowCount: data ? data.length : 0 
+        };
+      }
+      
+      // 3. UPDATE with complex WHERE
+      if (text.toLowerCase().startsWith('update')) {
+        const tableMatch = text.match(/update\s+(\w+)/i);
+        if (!tableMatch) throw new Error('Invalid UPDATE query');
+        
+        const tableName = tableMatch[1];
+        
+        // Handle queue reset query
+        if (tableName === 'hubspot_webhook_queue' && text.includes('processing_started_at <')) {
+          const intervalMatch = params[0]?.match(/(\d+)\s*minutes/);
+          const minutes = intervalMatch ? parseInt(intervalMatch[1]) : 30;
+          const cutoffDate = new Date(Date.now() - minutes * 60 * 1000);
+          
+          const { data, error } = await supabase
+            .from('hubspot_webhook_queue')
+            .update({
+              status: 'pending',
+              processing_started_at: null,
+              next_retry_at: new Date().toISOString()
+            })
+            .eq('status', 'processing')
+            .lt('processing_started_at', cutoffDate.toISOString())
+            .select('id');
+          
+          if (error) throw error;
+          
+          // Handle attempts increment separately if needed
+          if (data && data.length > 0 && text.includes('attempts + 1')) {
+            for (const item of data) {
+              await supabase
+                .from('hubspot_webhook_queue')
+                .update({ attempts: item.attempts + 1 })
+                .eq('id', item.id);
+            }
+          }
+          
+          return { 
+            rows: data || [], 
+            rowCount: data ? data.length : 0 
+          };
+        }
+      }
+      
+      // 4. Simple SELECT COUNT queries
+      if (text.toLowerCase().includes('select count(*)')) {
+        const tableMatch = text.match(/from\s+(\w+)/i);
+        const whereMatch = text.match(/where\s+(\w+)\s*=\s*\$1/i);
+        
+        if (tableMatch) {
+          let query = supabase.from(tableMatch[1]).select('*', { count: 'exact', head: true });
+          
+          if (whereMatch && params.length > 0) {
+            query = query.eq(whereMatch[1], params[0]);
+          }
+          
+          const { count, error } = await query;
+          if (error) throw error;
+          
+          return {
+            rows: [{ total: count.toString() }],
+            rowCount: 1
+          };
+        }
+      }
+      
+      // 5. SELECT with LIMIT and OFFSET
+      if (text.toLowerCase().includes('select * from')) {
+        const tableMatch = text.match(/from\s+(\w+)/i);
+        const whereMatch = text.match(/where\s+(\w+)\s*=\s*\$1/i);
+        const limitMatch = text.match(/limit\s+\$(\d+)/i);
+        const offsetMatch = text.match(/offset\s+\$(\d+)/i);
+        
+        if (tableMatch) {
+          let query = supabase.from(tableMatch[1]).select('*');
+          
+          if (whereMatch && params.length > 0) {
+            query = query.eq(whereMatch[1], params[0]);
+          }
+          
+          if (limitMatch) {
+            const limitIndex = parseInt(limitMatch[1]) - 1;
+            query = query.limit(params[limitIndex]);
+          }
+          
+          if (offsetMatch) {
+            const offsetIndex = parseInt(offsetMatch[1]) - 1;
+            query = query.range(params[offsetIndex], params[offsetIndex] + (params[limitIndex - 1] || 20) - 1);
+          }
+          
+          const { data, error } = await query;
+          if (error) throw error;
+          
+          return {
+            rows: data || [],
+            rowCount: data ? data.length : 0
+          };
+        }
+      }
+      
+      // If we can't handle the query, suggest using query builder
+      throw new Error(`Complex SQL queries are not supported directly. Please use Supabase query builder methods or create a database function for: ${text.substring(0, 100)}...`);
     });
   },
   
@@ -283,6 +478,45 @@ export const db = {
   },
   
   /**
+   * Delete data from a table
+   * @param {string} table - Table name
+   * @param {Object} conditions - Where conditions
+   * @param {Object} options - Delete options
+   * @returns {Promise<Object>} Delete result
+   */
+  delete: async (table, conditions = {}, options = {}) => {
+    return db.executeWithRetry(async (supabase) => {
+      let query = supabase.from(table).delete();
+      
+      // Apply conditions
+      Object.entries(conditions).forEach(([column, value]) => {
+        query = query.eq(column, value);
+      });
+      
+      // Apply options
+      if (options.returning) {
+        let selectColumns;
+        
+        if (options.returning === true) {
+          selectColumns = '*';
+        } else if (Array.isArray(options.returning)) {
+          selectColumns = options.returning.join(',');
+        } else {
+          selectColumns = options.returning;
+        }
+        
+        query.select(selectColumns);
+      }
+      
+      const { data: result, error } = await query;
+      
+      if (error) throw error;
+      
+      return { rows: result || [], rowCount: result ? result.length : 0 };
+    });
+  },
+  
+  /**
    * Select data from a table
    * @param {string} table - Table name
    * @param {Object} conditions - Where conditions
@@ -335,28 +569,12 @@ export const db = {
         };
       }
       
-      // For traditional environment, query for stats
-      return db.executeWithRetry(async (supabase) => {
-        // This is a simplified example - actual stats would depend on Supabase capabilities
-        const { data, error } = await supabase
-          .from('pg_stat_activity')
-          .select('count');
-          
-        if (error) {
-          logger.warn('Failed to get detailed DB stats', error);
-          return {
-            initialized: isInitialized,
-            connections: 'unknown',
-            environment: 'traditional'
-          };
-        }
-        
-        return {
-          initialized: isInitialized,
-          connections: data?.length || 0,
-          environment: 'traditional'
-        };
-      });
+      // For traditional environment, provide basic stats
+      return {
+        initialized: isInitialized,
+        lastUsed: new Date(lastUsedTimestamp).toISOString(),
+        environment: 'traditional'
+      };
     } catch (error) {
       logger.error('Error getting database stats', error);
       return {
