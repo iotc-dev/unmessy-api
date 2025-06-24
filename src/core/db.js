@@ -207,7 +207,15 @@ export const db = {
         try {
           const { data, error } = await supabase.rpc(textOrFunction, params);
           
-          if (error) throw error;
+          if (error) {
+            logger.error('RPC function error', error, { 
+              function: textOrFunction, 
+              params,
+              code: error.code,
+              message: error.message 
+            });
+            throw error;
+          }
           
           // Format response to match expected structure
           // If data is a single value, wrap it in an array of objects
@@ -220,6 +228,12 @@ export const db = {
           } else {
             rows = [];
           }
+          
+          logger.debug('RPC function result', { 
+            function: textOrFunction, 
+            rowCount: rows.length,
+            result: rows[0] 
+          });
           
           return { rows, rowCount: rows.length };
         } catch (error) {

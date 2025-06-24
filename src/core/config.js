@@ -1,36 +1,84 @@
 // src/core/config.js
 import dotenv from 'dotenv';
 
-// Load .env file if it exists (for local development)
-// This won't error in Vercel where .env doesn't exist
+// Load environment variables
 dotenv.config();
 
-// Helper function to parse boolean environment variables
+/**
+ * Application configuration
+ * Centralizes all configuration settings with environment variable support
+ */
+
+// Helper functions for type conversion
 const parseBoolean = (value, defaultValue = false) => {
-  if (value === undefined || value === null || value === '') return defaultValue;
-  return value === 'true' || value === '1';
+  if (value === undefined || value === null) return defaultValue;
+  return value === 'true' || value === '1' || value === true;
 };
 
-// Helper function to parse integer environment variables
-const parseInteger = (value, defaultValue) => {
+const parseInteger = (value, defaultValue = 0) => {
   const parsed = parseInt(value, 10);
   return isNaN(parsed) ? defaultValue : parsed;
 };
 
-// Helper function to get required environment variable
-const getRequired = (key, description) => {
-  const value = process.env[key];
-  if (!value && process.env.NODE_ENV === 'production') {
-    console.error(`Missing required environment variable: ${key} (${description})`);
+const getOptional = (envVar, defaultValue = '') => {
+  return process.env[envVar] || defaultValue;
+};
+
+const getRequired = (envVar, defaultValue = null) => {
+  const value = process.env[envVar] || defaultValue;
+  if (!value) {
+    console.error(`Required environment variable ${envVar} is not set`);
   }
   return value;
 };
 
-// Helper function to get optional environment variable with default
-const getOptional = (key, defaultValue) => {
-  return process.env[key] || defaultValue;
-};
+// Client configuration management
+class ClientConfig {
+  constructor() {
+    this.clients = new Map();
+    this.loadClients();
+  }
+  
+  loadClients() {
+    // Load up to 10 client configurations from environment
+    for (let i = 1; i <= 10; i++) {
+      const key = process.env[`CLIENT_${i}_KEY`];
+      const id = process.env[`CLIENT_${i}_ID`];
+      
+      if (key && id) {
+        this.clients.set(key, { id, key, index: i });
+        console.log(`Loaded client ${i}: ID=${id}`);
+      }
+    }
+    
+    if (this.clients.size === 0) {
+      console.warn('No client configurations found. API authentication will fail.');
+    }
+  }
+  
+  getByKey(apiKey) {
+    return this.clients.get(apiKey);
+  }
+  
+  getById(clientId) {
+    for (const [key, client] of this.clients) {
+      if (client.id === clientId) {
+        return client;
+      }
+    }
+    return null;
+  }
+  
+  getAllIds() {
+    return Array.from(this.clients.values()).map(c => c.id);
+  }
+  
+  getAll() {
+    return this.clients;
+  }
+}
 
+// Main configuration object
 export const config = {
   // Environment
   env: process.env.NODE_ENV || 'development',
@@ -38,115 +86,92 @@ export const config = {
   isDevelopment: process.env.NODE_ENV === 'development',
   isTest: process.env.NODE_ENV === 'test',
   
-  // Vercel specific
-  isVercel: !!process.env.VERCEL,
-  vercelEnv: process.env.VERCEL_ENV, // 'production', 'preview', or 'development'
-  vercelRegion: process.env.VERCEL_REGION,
-  vercelUrl: process.env.VERCEL_URL,
+  // Vercel-specific
+  isVercel: process.env.VERCEL === '1',
+  vercelEnv: process.env.VERCEL_ENV,
+  vercelRegion: process.env.VERCEL_REGION || process.env.AWS_REGION,
   
   // Server
   port: parseInteger(process.env.PORT, 3000),
+  host: getOptional('HOST', '0.0.0.0'),
   
-  // Database (Supabase)
+  // Database
   database: {
-    url: getRequired('SUPABASE_URL', 'Supabase project URL'),
-    key: getRequired('SUPABASE_SERVICE_ROLE_KEY', 'Supabase service role key'),
+    url: getRequired('SUPABASE_URL'),
+    key: getRequired('SUPABASE_SERVICE_ROLE_KEY'),
+    maxRetries: parseInteger(process.env.DB_MAX_RETRIES, 3),
+    retryDelay: parseInteger(process.env.DB_RETRY_DELAY, 1000),
     poolMin: parseInteger(process.env.DB_POOL_MIN, 2),
     poolMax: parseInteger(process.env.DB_POOL_MAX, 10),
-    idleTimeoutMs: parseInteger(process.env.DB_IDLE_TIMEOUT, 30000),
-    connectionTimeoutMs: parseInteger(process.env.DB_CONNECTION_TIMEOUT, 5000)
+    connectionTimeoutMs: parseInteger(process.env.DB_CONNECTION_TIMEOUT_MS, 10000)
+  },
+  
+  // Clients
+  clients: new ClientConfig(),
+  
+  // Security
+  security: {
+    saltRounds: parseInteger(process.env.BCRYPT_SALT_ROUNDS, 10),
+    jwtSecret: getOptional('JWT_SECRET', 'default-secret-change-in-production'),
+    jwtExpiry: getOptional('JWT_EXPIRY', '24h'),
+    corsOrigin: getOptional('CORS_ORIGIN', '*'),
+    trustedProxies: parseInteger(process.env.TRUSTED_PROXIES, 1),
+    cronSecret: getOptional('CRON_SECRET', '')
+  },
+  
+  // Rate Limiting
+  rateLimit: {
+    windowMs: parseInteger(process.env.RATE_LIMIT_WINDOW_MS, 60000), // 1 minute
+    maxRequests: parseInteger(process.env.RATE_LIMIT_MAX_REQUESTS, 100),
+    skipSuccessfulRequests: parseBoolean(process.env.RATE_LIMIT_SKIP_SUCCESSFUL, false),
+    skipFailedRequests: parseBoolean(process.env.RATE_LIMIT_SKIP_FAILED, false)
   },
   
   // External Services
   services: {
-    // ZeroBounce (Email Validation)
     zeroBounce: {
-    apiKey: getOptional('ZERO_BOUNCE_API_KEY', ''),
-    enabled: parseBoolean(process.env.USE_ZERO_BOUNCE, false),
-    timeout: parseInteger(process.env.ZERO_BOUNCE_TIMEOUT, 6000),
-    retryTimeout: parseInteger(process.env.ZERO_BOUNCE_RETRY_TIMEOUT, 8000),
-    maxRetries: parseInteger(process.env.ZERO_BOUNCE_MAX_RETRIES, 3),
-    baseUrl: getOptional('ZERO_BOUNCE_BASE_URL', 'https://api.zerobounce.net/v2'),
-    useUSEndpoint: parseBoolean(process.env.ZERO_BOUNCE_USE_US_ENDPOINT, false)
-  },
-    
-    // OpenCage (Address Geocoding)
+      apiKey: getOptional('ZEROBOUNCE_API_KEY'),
+      baseUrl: getOptional('ZEROBOUNCE_BASE_URL', 'https://api.zerobounce.net/v2'),
+      timeout: parseInteger(process.env.ZEROBOUNCE_TIMEOUT, 10000),
+      retries: parseInteger(process.env.ZEROBOUNCE_RETRIES, 2),
+      enabled: parseBoolean(process.env.ZEROBOUNCE_ENABLED, true)
+    },
     openCage: {
-      apiKey: getOptional('OPENCAGE_API_KEY', ''),
-      baseUrl: getOptional('OPENCAGE_BASE_URL', 'https://api.opencagedata.com'),
-      enabled: parseBoolean(process.env.USE_OPENCAGE, false),
-      timeout: parseInteger(process.env.OPENCAGE_TIMEOUT, 5000),
-      retryTimeout: parseInteger(process.env.OPENCAGE_RETRY_TIMEOUT, 7000),
-      maxRetries: parseInteger(process.env.OPENCAGE_MAX_RETRIES, 2)
+      apiKey: getOptional('OPENCAGE_API_KEY'),
+      baseUrl: getOptional('OPENCAGE_BASE_URL', 'https://api.opencagedata.com/geocode/v1'),
+      timeout: parseInteger(process.env.OPENCAGE_TIMEOUT, 10000),
+      retries: parseInteger(process.env.OPENCAGE_RETRIES, 2),
+      enabled: parseBoolean(process.env.OPENCAGE_ENABLED, true)
     },
-    
-    // HubSpot Integration
-    hubspot: {
-      enabled: parseBoolean(process.env.USE_HUBSPOT, false),
-      timeout: parseInteger(process.env.HUBSPOT_TIMEOUT, 5000),
-      maxRetries: parseInteger(process.env.HUBSPOT_MAX_RETRIES, 3),
-      verifySignature: parseBoolean(process.env.HUBSPOT_VERIFY_SIGNATURE, true)
+    numverify: {
+      apiKey: getOptional('NUMVERIFY_API_KEY'),
+      baseUrl: getOptional('NUMVERIFY_BASE_URL', 'http://apilayer.net/api'),
+      timeout: parseInteger(process.env.NUMVERIFY_TIMEOUT, 10000),
+      retries: parseInteger(process.env.NUMVERIFY_RETRIES, 2),
+      enabled: parseBoolean(process.env.NUMVERIFY_ENABLED, false)
     }
-  },
-  
-  // Client Configuration
-  clients: {
-    apiKeyHeader: getOptional('API_KEY_HEADER', 'X-API-Key'),
-    defaultQuota: parseInteger(process.env.DEFAULT_QUOTA, 1000),
-    defaultClientId: getOptional('DEFAULT_CLIENT_ID', '0001'),
-    
-    // Get client API keys from environment
-    getAll: () => {
-      const clients = new Map();
-      const envKeys = Object.keys(process.env);
-      
-      // Find all CLIENT_N_KEY variables
-      const clientKeyPattern = /^CLIENT_(\d+)_KEY$/;
-      const clientKeys = envKeys.filter(key => clientKeyPattern.test(key));
-      
-      clientKeys.forEach(keyVar => {
-        const match = keyVar.match(clientKeyPattern);
-        if (match) {
-          const num = match[1];
-          const idVar = `CLIENT_${num}_ID`;
-          const apiKey = process.env[keyVar];
-          const clientId = process.env[idVar];
-          
-          if (apiKey && clientId) {
-            clients.set(apiKey, clientId);
-          }
-        }
-      });
-      
-      return clients;
-    }
-  },
-  
-  // Security
-  security: {
-    corsOrigins: getOptional('ALLOWED_ORIGINS', '*').split(',').map(o => o.trim()),
-    corsCredentials: parseBoolean(process.env.CORS_CREDENTIALS, true),
-    helmet: {
-      contentSecurityPolicy: parseBoolean(process.env.HELMET_CSP, false) // Usually false for APIs
-    },
-    cronSecret: getOptional('CRON_SECRET', ''),
-    adminSecret: getOptional('ADMIN_SECRET', ''),
-    jwtSecret: getOptional('JWT_SECRET', 'default-secret-change-in-production'),
-    // Add IP allowlist for cron jobs if needed
-    cronAllowedIPs: getOptional('CRON_ALLOWED_IPS', '').split(',').filter(ip => ip.trim().length > 0)
   },
   
   // Logging
   logging: {
     level: getOptional('LOG_LEVEL', 'info'),
-    format: getOptional('LOG_FORMAT', 'json'), // 'json' or 'pretty'
-    includeTimestamp: parseBoolean(process.env.LOG_TIMESTAMP, true),
-    includeLevel: parseBoolean(process.env.LOG_LEVEL_NAME, true)
+    format: getOptional('LOG_FORMAT', 'json'),
+    colorize: parseBoolean(process.env.LOG_COLORIZE, true),
+    timestamp: parseBoolean(process.env.LOG_TIMESTAMP, true),
+    maxFiles: parseInteger(process.env.LOG_MAX_FILES, 5),
+    maxFileSize: getOptional('LOG_MAX_FILE_SIZE', '20m'),
+    directory: getOptional('LOG_DIRECTORY', 'logs'),
+    enableConsole: parseBoolean(process.env.LOG_CONSOLE, true),
+    enableFile: parseBoolean(process.env.LOG_FILE, false)
   },
   
   // Monitoring
   monitoring: {
-    enabled: parseBoolean(process.env.ENABLE_METRICS, false), // Disabled for Vercel
+    enableMetrics: parseBoolean(process.env.ENABLE_METRICS, true),
+    enableHealthCheck: parseBoolean(process.env.ENABLE_HEALTH_CHECK, true),
+    enableAlerting: parseBoolean(process.env.ENABLE_ALERTING, true),
+    alertWebhook: getOptional('ALERT_WEBHOOK_URL'),
+    alertEmail: getOptional('ALERT_EMAIL'),
     persistMetrics: parseBoolean(process.env.PERSIST_METRICS, false),
     metricsPort: parseInteger(process.env.METRICS_PORT, 9090),
     healthCheckPath: '/api/health',
@@ -154,7 +179,7 @@ export const config = {
     livenessPath: '/api/live'
   },
   
-  // Queue Configuration
+  // Queue Configuration - UPDATED WITH YOUR REQUIREMENTS
   queue: {
     pendingThreshold: parseInteger(process.env.QUEUE_PENDING_THRESHOLD, 100),
     stalledThresholdMinutes: parseInteger(process.env.QUEUE_STALLED_THRESHOLD_MINUTES, 30),
@@ -163,9 +188,9 @@ export const config = {
     retryBackoffBase: parseInteger(process.env.QUEUE_RETRY_BACKOFF_BASE, 5), // minutes
     retryBackoffMax: parseInteger(process.env.QUEUE_RETRY_BACKOFF_MAX, 120), // minutes
     completedRetentionDays: parseInteger(process.env.QUEUE_COMPLETED_RETENTION_DAYS, 30),
-    batchSize: parseInteger(process.env.QUEUE_BATCH_SIZE, 25),
-    maxConcurrency: parseInteger(process.env.QUEUE_MAX_CONCURRENCY, 5),
-    maxRuntime: parseInteger(process.env.QUEUE_MAX_RUNTIME, 270000), // 4.5 minutes
+    batchSize: parseInteger(process.env.QUEUE_BATCH_SIZE, 30), // Changed to 30 items per minute
+    maxConcurrency: parseInteger(process.env.QUEUE_MAX_CONCURRENCY, 5), // Stays at 5
+    maxRuntime: parseInteger(process.env.QUEUE_MAX_RUNTIME, 60000), // Changed to 60 seconds
     lockTimeout: parseInteger(process.env.QUEUE_LOCK_TIMEOUT, 300000), // 5 minutes
     // Cron job configuration
     cronJobs: {
@@ -267,23 +292,24 @@ export function validateConfig() {
     vercelEnv: config.vercelEnv,
     databaseConfigured: !!config.database.url,
     clientsConfigured: clients.size,
-    servicesEnabled: {
+    externalServices: {
       zeroBounce: config.services.zeroBounce.enabled,
       openCage: config.services.openCage.enabled,
-      hubspot: config.unmessy.features.hubspotIntegration
+      numverify: config.services.numverify.enabled
     },
-    featuresEnabled: config.unmessy.features,
-    cronConfigured: !!config.security.cronSecret
+    queue: {
+      batchSize: config.queue.batchSize,
+      maxConcurrency: config.queue.maxConcurrency,
+      maxRuntime: config.queue.maxRuntime
+    }
   });
   
   if (errors.length > 0) {
     console.error('Configuration errors:', errors);
-    if (config.isProduction) {
-      throw new Error(`Configuration validation failed: ${errors.join(', ')}`);
-    }
+    return false;
   }
   
-  return errors.length === 0;
+  return true;
 }
 
 // Export default
