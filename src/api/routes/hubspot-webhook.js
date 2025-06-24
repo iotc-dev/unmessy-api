@@ -99,11 +99,11 @@ async function fetchContactData(contactId, apiKey) {
 }
 
 /**
- * Fast webhook handler for HubSpot events
+ * Webhook handler for HubSpot events
  * This handler processes events quickly and returns 200 OK immediately
  * while queuing events for asynchronous processing
  */
-router.post('/webhook-fast', asyncHandler(async (req, res) => {
+router.post('/webhook', asyncHandler(async (req, res) => {
   const startTime = Date.now();
 
   try {
@@ -304,7 +304,7 @@ router.get('/health', asyncHandler(async (req, res) => {
     return res.status(200).json({
       status: 'ok',
       timestamp: new Date().toISOString(),
-      webhook: 'fast-handler',
+      webhook: 'active',
       queue: queueStats,
       hubspot: {
         enabledClients: hubspotClientsCount,
