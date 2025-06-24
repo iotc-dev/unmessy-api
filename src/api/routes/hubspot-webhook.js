@@ -88,7 +88,7 @@ async function fetchContactData(contactId, apiKey) {
   }
 
   try {
-    return await hubspotService.getContact(contactId, apiKey);
+    return await hubspotService.fetchContact(contactId, apiKey);
   } catch (error) {
     logger.error('Error fetching contact', {
       contactId,

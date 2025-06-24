@@ -1,7 +1,7 @@
 unmessy api{
     src{
         api{
-            index.js
+          
             middleware{
                 auth.js
                 error-handler.js
@@ -14,8 +14,11 @@ unmessy api{
             health.js
             hubspot-webhook.js
             validate.js
+            cron.js
         }
-        Server.js
+        server.js
+        index.js
+        vercel.js
     }
     core{
         config.js
@@ -37,8 +40,13 @@ unmessy api{
             hubspot.js
             opencage.js
             zerobounce.js
+            numverify.js
         }
         validation{
+            data{
+                country-mappings.json
+                fictional-numbers.json
+            }
             name-validation-service.js
             email-validation-service.js
             phone-validation-service.js
@@ -66,6 +74,7 @@ unmessy api{
         }
         
     }
+    api.cjs
     package-Lock.json
     package.json
     vercel.json
