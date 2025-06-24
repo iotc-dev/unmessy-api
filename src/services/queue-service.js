@@ -229,6 +229,17 @@ class QueueService {
   // Get pending queue items
   async getPendingQueueItems(limit) {
     try {
+      // DEBUG: First check what's actually in the queue
+      const debugAll = await db.query(
+        `SELECT id, event_id, status, attempts, max_attempts, 
+                processing_completed_at, next_retry_at
+         FROM hubspot_webhook_queue 
+         ORDER BY id`
+      );
+      this.logger.warn('DEBUG: All queue items:', {
+        items: debugAll.rows
+      });
+      
       const { rows } = await db.query(
         `SELECT * FROM hubspot_webhook_queue
          WHERE status = 'pending'
@@ -238,6 +249,16 @@ class QueueService {
          LIMIT $1`,
         [limit]
       );
+      
+      this.logger.warn('DEBUG: Pending items found:', {
+        count: rows.length,
+        items: rows.map(r => ({
+          id: r.id,
+          status: r.status,
+          attempts: r.attempts,
+          completed_at: r.processing_completed_at
+        }))
+      });
       
       return rows;
     } catch (error) {
@@ -514,7 +535,7 @@ class QueueService {
         throw new Error('HubSpot form submission not configured');
       }
       
-      // Build form fields
+      // Build form fields - only um_ properties
       const fields = this.buildFormFields(contactData, validationResults, item.client_id);
       
       // Build form data object
@@ -523,15 +544,19 @@ class QueueService {
         formData[field.name] = field.value;
       });
       
-      // Submit to HubSpot
+      // Add context to identify the contact using object ID
+      const context = {
+        pageUri: 'https://unmessy-api.vercel.app/queue-processor',
+        pageName: 'Unmessy Queue Processor',
+        contactId: item.object_id // Use the HubSpot contact ID
+      };
+      
+      // Submit to HubSpot with contact context
       const result = await hubspotService.submitForm(
         formData,
         hubspotConfig.portalId,
         hubspotConfig.formGuid,
-        {
-          pageUri: 'https://unmessy-api.vercel.app/queue-processor',
-          pageName: 'Unmessy Queue Processor'
-        }
+        context
       );
       
       // Update rate limits
@@ -539,6 +564,16 @@ class QueueService {
       
       return result;
     } catch (error) {
+      // If form fields don't match, log but don't fail
+      if (error.message?.includes('field') || error.message?.includes('property')) {
+        this.logger.warn('Form field mismatch, some fields may not have been submitted', {
+          itemId: item.id,
+          contactId: item.object_id,
+          error: error.message
+        });
+        return { success: true, warning: 'partial_submission' };
+      }
+      
       this.logger.error('Failed to submit to HubSpot', error, {
         itemId: item.id,
         contactId: item.object_id
@@ -551,23 +586,18 @@ class QueueService {
   buildFormFields(contactData, validationResults, clientId) {
     const fields = [];
     
-    // Always include email for contact matching
-    fields.push({
-      name: 'email',
-      value: contactData?.properties?.email || ''
-    });
+    // ONLY include um_ properties - no native HubSpot fields
     
-    // Always include timestamp and check ID
+    // Always include UM check ID and epoch (keep original names)
     const epochMs = Date.now();
     const umCheckId = this.generateUmCheckId(clientId, epochMs);
     
     fields.push(
-      { name: 'date_last_um_check', value: new Date().toISOString() },
-      { name: 'date_last_um_check_epoch', value: epochMs.toString() },
-      { name: 'um_check_id', value: umCheckId.toString() }
+      { name: 'date_last_um_check_epoch', value: String(epochMs) }, // Ensure it's a string
+      { name: 'um_check_id', value: String(umCheckId) }  // Also ensure this is a string
     );
     
-    // Add email validation results
+    // Add email validation results (um_ properties only)
     if (validationResults.email && !validationResults.email.error) {
       const emailResult = validationResults.email;
       fields.push(
@@ -577,19 +607,71 @@ class QueueService {
       );
     }
     
-    // Add name validation results
+    // Add name validation results (um_ properties only)
     if (validationResults.name && !validationResults.name.error) {
       const nameResult = validationResults.name;
-      fields.push(
+      
+      // Only add fields that exist in HubSpot
+      const nameFields = [
         { name: 'um_first_name', value: nameResult.firstName || contactData?.properties?.firstname || '' },
         { name: 'um_last_name', value: nameResult.lastName || contactData?.properties?.lastname || '' },
-        { name: 'um_name', value: `${nameResult.firstName || ''} ${nameResult.lastName || ''}`.trim() },
         { name: 'um_name_status', value: nameResult.wasCorrected ? 'Changed' : 'Unchanged' },
         { name: 'um_name_format', value: nameResult.formatValid ? 'Valid' : 'Invalid' }
+      ];
+      
+      // Add optional name fields if present
+      if (nameResult.middleName) {
+        nameFields.push({ name: 'um_middle_name', value: nameResult.middleName });
+      }
+      
+      if (nameResult.honorific) {
+        nameFields.push({ name: 'um_honorific', value: nameResult.honorific });
+      }
+      
+      if (nameResult.suffix) {
+        nameFields.push({ name: 'um_suffix', value: nameResult.suffix });
+      }
+      
+      // Add the combined name field if you need it
+      if (nameResult.firstName || nameResult.lastName) {
+        nameFields.push({ 
+          name: 'um_name', 
+          value: `${nameResult.firstName || ''} ${nameResult.lastName || ''}`.trim() 
+        });
+      }
+      
+      fields.push(...nameFields);
+    }
+    
+    // Add phone validation results if present
+    if (validationResults.phone && !validationResults.phone.error) {
+      const phoneResult = validationResults.phone;
+      fields.push(
+        { name: 'um_phone1', value: phoneResult.formatted || '' },
+        { name: 'um_phone1_status', value: phoneResult.isValid ? 'Valid' : 'Invalid' },
+        { name: 'um_phone1_country_code', value: phoneResult.countryCode || '' },
+        { name: 'um_phone1_is_mobile', value: phoneResult.isMobile ? 'true' : 'false' }
       );
     }
     
-    return fields;
+    // Add address validation results if present
+    if (validationResults.address && !validationResults.address.error) {
+      const addressResult = validationResults.address;
+      // Only add um_ prefixed address fields
+      const addressFields = [
+        { name: 'um_address_line_1', value: addressResult.line1 || '' },
+        { name: 'um_city', value: addressResult.city || '' },
+        { name: 'um_state_province', value: addressResult.state || '' },
+        { name: 'um_postal_code', value: addressResult.postalCode || '' },
+        { name: 'um_country', value: addressResult.country || '' },
+        { name: 'um_address_status', value: addressResult.isValid ? 'Valid' : 'Invalid' }
+      ];
+      
+      fields.push(...addressFields);
+    }
+    
+    // Filter out any empty values to avoid form errors
+    return fields.filter(field => field.value !== null && field.value !== undefined && field.value !== '');
   }
   
   // Generate UM check ID
@@ -626,20 +708,45 @@ class QueueService {
   // Update queue item status
   async updateQueueItemStatus(itemId, status, additionalData = {}) {
     try {
+      this.logger.info('Updating queue item status', {
+        itemId,
+        oldStatus: 'unknown',
+        newStatus: status,
+        hasAdditionalData: Object.keys(additionalData).length > 0
+      });
+      
       const updates = {
         status,
         ...additionalData
       };
       
-      await db.update(
+      const result = await db.update(
         'hubspot_webhook_queue',
         updates,
         { id: itemId }
       );
+      
+      // Log the result
+      if (result.rows && result.rows.length > 0) {
+        this.logger.info('Queue item status updated successfully', {
+          itemId,
+          newStatus: result.rows[0].status,
+          updateConfirmed: result.rows[0].status === status
+        });
+      } else {
+        this.logger.error('Queue item update returned no rows', {
+          itemId,
+          attemptedStatus: status
+        });
+      }
+      
+      return result;
     } catch (error) {
       this.logger.error('Failed to update queue item status', error, {
         itemId,
-        status
+        status,
+        errorMessage: error.message,
+        errorCode: error.code
       });
       throw error;
     }

@@ -220,12 +220,12 @@ class HubSpotService {
   }
   
   /**
-   * Submit form data to HubSpot
+   * Submit form data to HubSpot with improved flexibility
    * 
    * @param {Object} formData - Form data to submit
    * @param {string} portalId - HubSpot portal ID
    * @param {string} formGuid - HubSpot form GUID
-   * @param {Object} options - Additional options
+   * @param {Object} options - Additional options including objectId for contact association
    * @returns {Promise<Object>} Submission response
    */
   async submitForm(formData, portalId, formGuid, options = {}) {
@@ -233,26 +233,89 @@ class HubSpotService {
       throw new ValidationError('Portal ID and Form GUID are required');
     }
     
-    if (!formData || !formData.email) {
-      throw new ValidationError('Form data must include an email address');
+    // No longer require email - form data can be empty or contain any fields
+    if (!formData || typeof formData !== 'object') {
+      this.logger.warn('Form data is empty or invalid, proceeding with empty fields');
+      formData = {};
     }
     
-    const { timeout = this.timeouts.form } = options;
+    const { 
+      timeout = this.timeouts.form,
+      objectId = null, // Contact ID for association
+      skipValidation = false, // Skip field validation
+      legalConsentOptions = null, // GDPR consent options
+      hutk = null // HubSpot tracking cookie
+    } = options;
     
     // Build URL
     const url = `https://api.hsforms.com/submissions/v3/integration/submit/${portalId}/${formGuid}`;
     
-    // Format form data
+    // Filter and format form fields, handling mismatches gracefully
+    const fields = [];
+    
+    Object.entries(formData).forEach(([name, value]) => {
+      try {
+        // Skip null, undefined, or function values
+        if (value === null || value === undefined || typeof value === 'function') {
+          this.logger.debug(`Skipping field ${name} with invalid value type`);
+          return;
+        }
+        
+        // Convert arrays and objects to strings
+        let fieldValue = value;
+        if (Array.isArray(value)) {
+          fieldValue = value.join(', ');
+        } else if (typeof value === 'object') {
+          fieldValue = JSON.stringify(value);
+        } else {
+          fieldValue = String(value);
+        }
+        
+        fields.push({
+          name,
+          value: fieldValue
+        });
+      } catch (error) {
+        this.logger.warn(`Error processing field ${name}, skipping`, { error: error.message });
+      }
+    });
+    
+    // Build the payload
     const payload = {
-      fields: Object.entries(formData).map(([name, value]) => ({
-        name,
-        value: value || ''
-      })),
+      fields,
       context: {
         pageUri: options.pageUri || 'https://unmessy.api/form',
         pageName: options.pageName || 'Unmessy API Form Submission'
       }
     };
+    
+    // Add HubSpot tracking cookie if provided
+    if (hutk) {
+      payload.context.hutk = hutk;
+    }
+    
+    // Add IP address if provided
+    if (options.ipAddress) {
+      payload.context.ipAddress = options.ipAddress;
+    }
+    
+    // Add legal consent options if provided
+    if (legalConsentOptions) {
+      payload.legalConsentOptions = legalConsentOptions;
+    }
+    
+    // Add contact association if objectId is provided
+    if (objectId) {
+      // For v3 API, we can associate the submission with an existing contact
+      payload.context.objectId = objectId;
+      
+      // Log the association attempt
+      this.logger.info('Associating form submission with contact', {
+        formGuid,
+        objectId,
+        fieldCount: fields.length
+      });
+    }
     
     // Configure request options
     const requestOptions = {
@@ -275,14 +338,52 @@ class HubSpotService {
       
       const data = await this.circuitBreaker.fire(requestData);
       
+      // Log successful submission
+      this.logger.info('Form submitted successfully', {
+        formGuid,
+        portalId,
+        objectId: objectId || 'none',
+        fieldCount: fields.length
+      });
+      
       return {
         success: true,
         inlineMessage: data.inlineMessage,
         redirectUrl: data.redirectUri,
         portalId,
-        formGuid
+        formGuid,
+        objectId: objectId || null,
+        submittedFields: fields.map(f => f.name)
       };
     } catch (error) {
+      // Enhanced error handling for field mismatches
+      if (error instanceof HubSpotError && error.statusCode === 400) {
+        // Try to parse the error for field-specific issues
+        const errorMessage = error.message.toLowerCase();
+        
+        if (errorMessage.includes('field') || errorMessage.includes('property')) {
+          this.logger.warn('Form field mismatch detected', {
+            formGuid,
+            error: error.message,
+            submittedFields: fields.map(f => f.name)
+          });
+          
+          // If skipValidation is true, return a partial success
+          if (skipValidation) {
+            return {
+              success: false,
+              partial: true,
+              error: 'Field validation failed but skipValidation was set',
+              originalError: error.message,
+              portalId,
+              formGuid,
+              objectId: objectId || null,
+              submittedFields: fields.map(f => f.name)
+            };
+          }
+        }
+      }
+      
       if (error.name === 'CircuitBreaker:OpenError') {
         throw new HubSpotError('HubSpot service is currently unavailable (circuit open)', 503);
       }
@@ -296,6 +397,64 @@ class HubSpotService {
       }
       
       throw new HubSpotError(`Form submission failed: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Get form fields from HubSpot to validate against
+   * 
+   * @param {string} formGuid - HubSpot form GUID
+   * @param {string} apiKey - HubSpot API key
+   * @returns {Promise<Array>} Form fields
+   */
+  async getFormFields(formGuid, apiKey) {
+    if (!apiKey) {
+      throw new HubSpotError('No HubSpot API key provided', 400);
+    }
+    
+    if (!formGuid) {
+      throw new ValidationError('Form GUID is required');
+    }
+    
+    // Build URL - using v3 API
+    const url = `https://api.hubapi.com/marketing/v3/forms/${formGuid}`;
+    
+    // Configure request options
+    const requestOptions = {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Accept': 'application/json'
+      }
+    };
+    
+    try {
+      const requestData = {
+        url,
+        options: requestOptions,
+        operation: `get form fields ${formGuid}`,
+        timeout: this.timeouts.contacts
+      };
+      
+      const data = await this.circuitBreaker.fire(requestData);
+      
+      // Extract field information
+      const fields = data.formFieldGroups?.flatMap(group => 
+        group.fields?.map(field => ({
+          name: field.name,
+          label: field.label,
+          type: field.fieldType,
+          required: field.required,
+          options: field.options || []
+        }))
+      ) || [];
+      
+      return fields;
+    } catch (error) {
+      this.logger.error('Failed to get form fields', { formGuid, error: error.message });
+      
+      // Return empty array on error to allow form submission to proceed
+      return [];
     }
   }
   
@@ -552,6 +711,20 @@ class HubSpotService {
         circuitBreaker: this.circuitBreaker.status,
         error: error.message
       };
+    }
+  }
+  
+  /**
+   * Clear client config cache
+   * Useful when client settings are updated
+   */
+  clearConfigCache(clientId = null) {
+    if (clientId) {
+      this.clientConfigCache.delete(clientId);
+      this.logger.info('Cleared HubSpot config cache for client', { clientId });
+    } else {
+      this.clientConfigCache.clear();
+      this.logger.info('Cleared entire HubSpot config cache');
     }
   }
 }
