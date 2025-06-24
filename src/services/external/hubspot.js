@@ -206,6 +206,18 @@ class HubSpotService {
       throw new HubSpotError(`Failed to fetch contact: ${error.message}`);
     }
   }
+
+  /**
+   * Get contact from HubSpot (alias for fetchContact for backward compatibility)
+   * 
+   * @param {string} contactId - HubSpot contact ID
+   * @param {string} apiKey - HubSpot API key
+   * @param {Object} options - Additional options
+   * @returns {Promise<Object>} Contact data
+   */
+  async getContact(contactId, apiKey, options = {}) {
+    return this.fetchContact(contactId, apiKey, options);
+  }
   
   /**
    * Submit form data to HubSpot
@@ -288,30 +300,68 @@ class HubSpotService {
   }
   
   /**
-   * Verify webhook signature
+   * Verify webhook signature with version support
    * 
-   * @param {string} signature - HubSpot signature
    * @param {string} requestBody - Raw request body
+   * @param {string} signature - HubSpot signature
    * @param {string} clientSecret - Client's webhook secret
+   * @param {string} version - Signature version (v1, v2, v3)
    * @returns {boolean} Whether signature is valid
    */
-  verifyWebhookSignature(signature, requestBody, clientSecret) {
-    if (!signature || !requestBody || !clientSecret) {
+  verifyWebhookSignature(requestBody, signature, clientSecret, version = 'v1') {
+    if (!requestBody || !signature || !clientSecret) {
+      this.logger.warn('Missing required parameters for signature verification');
       return false;
     }
     
     try {
-      // Compute signature
-      const computedSignature = crypto
-        .createHmac('sha256', clientSecret)
-        .update(requestBody)
-        .digest('hex');
+      let computedSignature;
       
-      // Compare signatures
-      return crypto.timingSafeEqual(
-        Buffer.from(signature),
-        Buffer.from(computedSignature)
-      );
+      // Handle different signature versions
+      switch (version) {
+        case 'v1':
+          // V1: SHA256 hash of client secret + request body
+          computedSignature = crypto
+            .createHash('sha256')
+            .update(clientSecret + requestBody)
+            .digest('hex');
+          break;
+          
+        case 'v2':
+          // V2: HMAC-SHA256 with client secret as key
+          computedSignature = crypto
+            .createHmac('sha256', clientSecret)
+            .update(requestBody)
+            .digest('hex');
+          break;
+          
+        case 'v3':
+          // V3: HMAC-SHA256 with UTF-8 encoding explicitly
+          computedSignature = crypto
+            .createHmac('sha256', clientSecret)
+            .update(requestBody, 'utf8')
+            .digest('hex');
+          break;
+          
+        default:
+          // Default to v2 for unknown versions
+          computedSignature = crypto
+            .createHmac('sha256', clientSecret)
+            .update(requestBody)
+            .digest('hex');
+      }
+      
+      // For v1, HubSpot sends the signature directly
+      // For v2/v3, it might include a prefix like "sha256="
+      let hubspotSignature = signature;
+      if (signature.includes('=')) {
+        hubspotSignature = signature.split('=')[1];
+      }
+      
+      // Compare signatures (both should be hex strings now)
+      // Using string comparison instead of timingSafeEqual to avoid length mismatch issues
+      return computedSignature === hubspotSignature;
+      
     } catch (error) {
       this.logger.error('Webhook signature verification failed', error);
       return false;

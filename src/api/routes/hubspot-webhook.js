@@ -39,7 +39,35 @@ function verifySignature(req, secret) {
       return false;
     }
 
-    const body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+    // IMPORTANT: Use the raw body for signature verification
+    let body;
+    
+    if (req.rawBody) {
+      // If we have raw body from middleware
+      body = req.rawBody;
+    } else {
+      // Reconstruct the body - handle both array and object cases
+      const parsedBody = req.body;
+      
+      // Check if body was parsed as object with numeric keys (Express parsed array as object)
+      if (parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)) {
+        // Check if it looks like a parsed array (has keys "0", "1", etc.)
+        const keys = Object.keys(parsedBody);
+        const isArrayLike = keys.every(key => !isNaN(parseInt(key)));
+        
+        if (isArrayLike) {
+          // Reconstruct as array
+          const array = keys.sort((a, b) => parseInt(a) - parseInt(b))
+            .map(key => parsedBody[key]);
+          body = JSON.stringify(array);
+        } else {
+          body = JSON.stringify(parsedBody);
+        }
+      } else {
+        body = JSON.stringify(parsedBody);
+      }
+    }
+    
     return hubspotService.verifyWebhookSignature(body, signature, secret, version);
   } catch (error) {
     logger.error('Signature verification error', error);
@@ -120,8 +148,26 @@ router.post('/webhook', asyncHandler(async (req, res) => {
       }
     });
 
-    // Parse events
-    const events = Array.isArray(req.body) ? req.body : [req.body];
+    // Parse events - handle both array and object with numeric keys
+    let events;
+    if (Array.isArray(req.body)) {
+      events = req.body;
+    } else if (typeof req.body === 'object' && req.body !== null) {
+      // Check if it's an object with numeric keys (parsed array)
+      const keys = Object.keys(req.body);
+      const isArrayLike = keys.length > 0 && keys.every(key => !isNaN(parseInt(key)));
+      
+      if (isArrayLike) {
+        // Convert back to array
+        events = keys.sort((a, b) => parseInt(a) - parseInt(b))
+          .map(key => req.body[key]);
+      } else {
+        // Single event as object
+        events = [req.body];
+      }
+    } else {
+      events = [];
+    }
 
     if (events.length === 0) {
       return res.status(400).json({ error: 'No events provided' });

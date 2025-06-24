@@ -58,6 +58,41 @@ app.use(cors({
 }));
 
 app.use(compression());
+
+// Raw body capture for HubSpot webhooks (MUST be before express.json())
+app.use('/api/hubspot/webhook', (req, res, next) => {
+  if (req.method !== 'POST') {
+    return next();
+  }
+  
+  let rawBody = '';
+  req.setEncoding('utf8');
+  
+  req.on('data', chunk => {
+    rawBody += chunk;
+  });
+  
+  req.on('end', () => {
+    req.rawBody = rawBody;
+    
+    // Parse the body manually
+    try {
+      req.body = JSON.parse(rawBody);
+    } catch (e) {
+      logger.error('Failed to parse webhook body', { error: e.message });
+      // Let express.json() handle it
+    }
+    
+    next();
+  });
+  
+  req.on('error', (err) => {
+    logger.error('Error reading webhook body', err);
+    next(err);
+  });
+});
+
+// Body parsing middleware (MUST come after raw body capture)
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
