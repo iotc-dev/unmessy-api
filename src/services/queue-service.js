@@ -31,10 +31,6 @@ class QueueService {
       lastProcessedAt: null
     };
     
-    // Lock management
-    this.lockId = null;
-    this.lockTimeout = config.queue.lockTimeout || 300000; // 5 minutes default
-    
     // Parallel processing configuration
     this.maxConcurrency = config.queue.maxConcurrency || 5;
   }
@@ -157,15 +153,6 @@ class QueueService {
     };
     
     try {
-      // Acquire lock
-      const lockAcquired = await this.acquireLock();
-      if (!lockAcquired) {
-        return {
-          status: 'locked',
-          message: 'Could not acquire processing lock'
-        };
-      }
-      
       // Fetch pending items
       const items = await this.getPendingQueueItems(batchSize);
       
@@ -236,9 +223,6 @@ class QueueService {
       this.isProcessing = false;
       this.processingStartTime = null;
       this.abortController = null;
-      
-      // Release lock
-      await this.releaseLock();
     }
   }
   
@@ -704,52 +688,6 @@ class QueueService {
     return delay;
   }
   
-  // Lock management
-  async acquireLock() {
-    try {
-      this.lockId = `queue_processor_${Date.now()}_${Math.random()}`;
-      
-      // Simple lock implementation using database
-      const { rows } = await db.insert(
-        'queue_locks',
-        {
-          lock_id: this.lockId,
-          locked_at: new Date(),
-          expires_at: new Date(Date.now() + this.lockTimeout)
-        },
-        { returning: true }
-      ).catch(() => ({ rows: [] })); // Ignore if table doesn't exist
-      
-      const acquired = rows.length > 0;
-      
-      if (acquired) {
-        this.logger.info('Queue processing lock acquired', { lockId: this.lockId });
-      }
-      
-      return acquired;
-    } catch (error) {
-      this.logger.error('Failed to acquire lock', error);
-      return false;
-    }
-  }
-  
-  async releaseLock() {
-    if (!this.lockId) return;
-    
-    try {
-      await db.query(
-        'DELETE FROM queue_locks WHERE lock_id = $1',
-        [this.lockId]
-      ).catch(() => {}); // Ignore if table doesn't exist
-      
-      this.logger.info('Queue processing lock released', { lockId: this.lockId });
-    } catch (error) {
-      this.logger.error('Failed to release lock', error);
-    } finally {
-      this.lockId = null;
-    }
-  }
-  
   // Update metrics
   updateMetrics(stats) {
     this.metrics.totalProcessed += stats.processed;
@@ -1020,7 +958,7 @@ class QueueService {
     try {
       const stats = await this.getQueueStats();
       const isHealthy = !this.isProcessing || 
-        (Date.now() - this.processingStartTime < this.lockTimeout);
+        (Date.now() - this.processingStartTime < config.queue.maxRuntime);
       
       return {
         status: isHealthy ? 'healthy' : 'unhealthy',
