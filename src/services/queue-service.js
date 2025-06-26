@@ -256,22 +256,34 @@ class QueueService {
       
       // Now get pending items using Supabase query builder
       const result = await db.executeWithRetry(async (supabase) => {
-        let query = supabase
+        // First get all pending items
+        const { data, error } = await supabase
           .from('hubspot_webhook_queue')
           .select('*')
           .eq('status', 'pending')
-          .lt('attempts', db.raw('max_attempts'))
           .order('created_at', { ascending: true })
-          .limit(limit);
-        
-        // Add condition for next_retry_at
-        // We need to handle both NULL and date comparison
-        const { data, error } = await query
-          .or('next_retry_at.is.null,next_retry_at.lte.' + new Date().toISOString());
+          .limit(limit * 2); // Get extra to filter in memory
         
         if (error) throw error;
         
-        return data || [];
+        // Filter in JavaScript to handle complex conditions
+        const now = new Date().toISOString();
+        const filteredData = (data || []).filter(item => {
+          // Check if attempts < max_attempts
+          if (item.attempts >= item.max_attempts) {
+            return false;
+          }
+          
+          // Check if next_retry_at is null or in the past
+          if (item.next_retry_at === null || item.next_retry_at <= now) {
+            return true;
+          }
+          
+          return false;
+        });
+        
+        // Return only the requested limit
+        return filteredData.slice(0, limit);
       });
       
       this.logger.warn('DEBUG: Pending items found:', {
@@ -1009,11 +1021,12 @@ class QueueService {
           .from('hubspot_webhook_queue')
           .select('id, attempts, max_attempts')
           .eq('status', 'processing')
-          .lt('processing_started_at', cutoffTime)
-          .lt('attempts', db.raw('max_attempts'));
+          .lt('processing_started_at', cutoffTime);
         
         if (error) throw error;
-        return data || [];
+        
+        // Filter items where attempts < max_attempts
+        return (data || []).filter(item => item.attempts < item.max_attempts);
       });
       
       // Reset each stalled item
