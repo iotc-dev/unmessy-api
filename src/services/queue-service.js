@@ -72,15 +72,29 @@ class QueueService {
       const queueItem = {
         event_id: eventData.event_id,
         subscription_type: eventData.subscription_type,
+        event_type: eventData.subscription_type,
         object_id: eventData.object_id,
         portal_id: eventData.portal_id,
         occurred_at: eventData.occurred_at,
         property_name: eventData.property_name,
         property_value: eventData.property_value,
+        previous_value: eventData.previous_value,
         contact_email: eventData.contact_email,
         contact_firstname: eventData.contact_firstname,
         contact_lastname: eventData.contact_lastname,
         contact_phone: eventData.contact_phone,
+        um_house_number: eventData.um_house_number,
+        um_street_name: eventData.um_street_name,
+        um_street_type: eventData.um_street_type,
+        um_street_direction: eventData.um_street_direction,
+        um_unit_type: eventData.um_unit_type,
+        um_unit_number: eventData.um_unit_number,
+        um_city: eventData.um_city,
+        um_state_province: eventData.um_state_province,
+        um_country: eventData.um_country,
+        um_country_code: eventData.um_country_code,
+        um_postal_code: eventData.um_postal_code,
+        um_address_status: eventData.um_address_status,
         status: 'pending',
         client_id: eventData.client_id,
         attempts: 0,
@@ -90,7 +104,8 @@ class QueueService {
         needs_phone_validation: eventData.needs_phone_validation || false,
         needs_address_validation: eventData.needs_address_validation || false,
         event_data: eventData.event_data,
-        contact_data: eventData.contact_data
+        contact_data: eventData.contact_data,
+        created_at: new Date().toISOString()
       };
       
       const { rows } = await db.insert('hubspot_webhook_queue', queueItem, {
@@ -153,7 +168,7 @@ class QueueService {
     };
     
     try {
-      // Fetch pending items
+      // Fetch pending items using Supabase query builder
       const items = await this.getPendingQueueItems(batchSize);
       
       if (items.length === 0) {
@@ -226,33 +241,42 @@ class QueueService {
     }
   }
   
-  // Get pending queue items
+  // Get pending queue items using Supabase query builder
   async getPendingQueueItems(limit) {
     try {
-      // DEBUG: First check what's actually in the queue
-      const debugAll = await db.query(
-        `SELECT id, event_id, status, attempts, max_attempts, 
-                processing_completed_at, next_retry_at
-         FROM hubspot_webhook_queue 
-         ORDER BY id`
-      );
-      this.logger.warn('DEBUG: All queue items:', {
-        items: debugAll.rows
+      // First, let's debug what's in the queue
+      const debugResult = await db.select('hubspot_webhook_queue', {}, {
+        columns: 'id, event_id, status, attempts, max_attempts, processing_completed_at, next_retry_at',
+        order: { column: 'id', ascending: true }
       });
       
-      const { rows } = await db.query(
-        `SELECT * FROM hubspot_webhook_queue
-         WHERE status = 'pending'
-         AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-         AND attempts < max_attempts
-         ORDER BY created_at ASC
-         LIMIT $1`,
-        [limit]
-      );
+      this.logger.warn('DEBUG: All queue items:', {
+        items: debugResult.rows
+      });
+      
+      // Now get pending items using Supabase query builder
+      const result = await db.executeWithRetry(async (supabase) => {
+        let query = supabase
+          .from('hubspot_webhook_queue')
+          .select('*')
+          .eq('status', 'pending')
+          .lt('attempts', db.raw('max_attempts'))
+          .order('created_at', { ascending: true })
+          .limit(limit);
+        
+        // Add condition for next_retry_at
+        // We need to handle both NULL and date comparison
+        const { data, error } = await query
+          .or('next_retry_at.is.null,next_retry_at.lte.' + new Date().toISOString());
+        
+        if (error) throw error;
+        
+        return data || [];
+      });
       
       this.logger.warn('DEBUG: Pending items found:', {
-        count: rows.length,
-        items: rows.map(r => ({
+        count: result.length,
+        items: result.map(r => ({
           id: r.id,
           status: r.status,
           attempts: r.attempts,
@@ -260,7 +284,7 @@ class QueueService {
         }))
       });
       
-      return rows;
+      return result;
     } catch (error) {
       this.logger.error('Failed to get pending queue items', error);
       throw new QueueError('Failed to fetch queue items', error);
@@ -454,6 +478,7 @@ class QueueService {
         {
           properties: [
             'email', 'firstname', 'lastname', 'phone',
+            'address', 'city', 'state', 'zip', 'country',
             'um_email', 'um_first_name', 'um_last_name',
             'um_email_status', 'um_bounce_status', 'um_name_status'
           ]
@@ -486,6 +511,14 @@ class QueueService {
     const shouldValidateName = 
       item.needs_name_validation && 
       (contactData?.properties?.firstname || contactData?.properties?.lastname);
+      
+    const shouldValidatePhone = 
+      item.needs_phone_validation && contactData?.properties?.phone;
+      
+    const shouldValidateAddress = 
+      item.needs_address_validation && 
+      (contactData?.properties?.address || contactData?.properties?.city || 
+       contactData?.properties?.state || contactData?.properties?.zip);
     
     // Run validations in parallel
     const validationPromises = [];
@@ -519,6 +552,40 @@ class QueueService {
       );
     }
     
+    if (shouldValidatePhone) {
+      validationPromises.push(
+        validationService.validatePhone(contactData.properties.phone, {
+          clientId: item.client_id
+        }).then(result => {
+          results.phone = result;
+        }).catch(error => {
+          this.logger.error('Phone validation failed', error);
+          results.phone = { error: error.message };
+        })
+      );
+    }
+    
+    if (shouldValidateAddress) {
+      const addressData = {
+        line1: contactData.properties.address,
+        city: contactData.properties.city,
+        state: contactData.properties.state,
+        postalCode: contactData.properties.zip,
+        country: contactData.properties.country
+      };
+      
+      validationPromises.push(
+        validationService.validateAddress(addressData, {
+          clientId: item.client_id
+        }).then(result => {
+          results.address = result;
+        }).catch(error => {
+          this.logger.error('Address validation failed', error);
+          results.address = { error: error.message };
+        })
+      );
+    }
+    
     // Wait for all validations to complete
     await Promise.all(validationPromises);
     
@@ -536,27 +603,19 @@ class QueueService {
       }
       
       // Build form fields - only um_ properties
-      const fields = this.buildFormFields(contactData, validationResults, item.client_id);
+      const formData = this.buildFormData(contactData, validationResults, item.client_id);
       
-      // Build form data object
-      const formData = {};
-      fields.forEach(field => {
-        formData[field.name] = field.value;
-      });
-      
-      // Add context to identify the contact using object ID
-      const context = {
-        pageUri: 'https://unmessy-api.vercel.app/queue-processor',
-        pageName: 'Unmessy Queue Processor',
-        contactId: item.object_id // Use the HubSpot contact ID
-      };
-      
-      // Submit to HubSpot with contact context
+      // Submit to HubSpot with contact association
       const result = await hubspotService.submitForm(
         formData,
         hubspotConfig.portalId,
         hubspotConfig.formGuid,
-        context
+        {
+          objectId: item.object_id, // Associate with the contact
+          skipValidation: true, // Handle field mismatches gracefully
+          pageUri: 'https://unmessy-api.vercel.app/queue-processor',
+          pageName: 'Unmessy Queue Processor'
+        }
       );
       
       // Update rate limits
@@ -582,96 +641,91 @@ class QueueService {
     }
   }
   
-  // Build form fields for HubSpot submission
-  buildFormFields(contactData, validationResults, clientId) {
-    const fields = [];
+  // Build form data for HubSpot submission
+  buildFormData(contactData, validationResults, clientId) {
+    const formData = {};
     
-    // ONLY include um_ properties - no native HubSpot fields
-    
-    // Always include UM check ID and epoch (keep original names)
+    // Always include UM check ID and epoch
     const epochMs = Date.now();
     const umCheckId = this.generateUmCheckId(clientId, epochMs);
     
-    fields.push(
-      { name: 'date_last_um_check_epoch', value: String(epochMs) }, // Ensure it's a string
-      { name: 'um_check_id', value: String(umCheckId) }  // Also ensure this is a string
-    );
+    formData.date_last_um_check_epoch = String(epochMs);
+    formData.um_check_id = String(umCheckId);
     
-    // Add email validation results (um_ properties only)
+    // Add email validation results
     if (validationResults.email && !validationResults.email.error) {
       const emailResult = validationResults.email;
-      fields.push(
-        { name: 'um_email', value: emailResult.currentEmail || emailResult.um_email || contactData?.properties?.email || '' },
-        { name: 'um_email_status', value: emailResult.um_email_status || 'Unchanged' },
-        { name: 'um_bounce_status', value: emailResult.um_bounce_status || 'Unknown' }
-      );
+      formData.um_email = emailResult.currentEmail || emailResult.um_email || contactData?.properties?.email || '';
+      formData.um_email_status = emailResult.um_email_status || 'Unchanged';
+      formData.um_bounce_status = emailResult.um_bounce_status || 'Unknown';
     }
     
-    // Add name validation results (um_ properties only)
+    // Add name validation results
     if (validationResults.name && !validationResults.name.error) {
       const nameResult = validationResults.name;
+      formData.um_first_name = nameResult.firstName || contactData?.properties?.firstname || '';
+      formData.um_last_name = nameResult.lastName || contactData?.properties?.lastname || '';
+      formData.um_name_status = nameResult.wasCorrected ? 'Changed' : 'Unchanged';
+      formData.um_name_format = nameResult.formatValid ? 'Valid' : 'Invalid';
       
-      // Only add fields that exist in HubSpot
-      const nameFields = [
-        { name: 'um_first_name', value: nameResult.firstName || contactData?.properties?.firstname || '' },
-        { name: 'um_last_name', value: nameResult.lastName || contactData?.properties?.lastname || '' },
-        { name: 'um_name_status', value: nameResult.wasCorrected ? 'Changed' : 'Unchanged' },
-        { name: 'um_name_format', value: nameResult.formatValid ? 'Valid' : 'Invalid' }
-      ];
-      
-      // Add optional name fields if present
       if (nameResult.middleName) {
-        nameFields.push({ name: 'um_middle_name', value: nameResult.middleName });
+        formData.um_middle_name = nameResult.middleName;
       }
       
       if (nameResult.honorific) {
-        nameFields.push({ name: 'um_honorific', value: nameResult.honorific });
+        formData.um_honorific = nameResult.honorific;
       }
       
       if (nameResult.suffix) {
-        nameFields.push({ name: 'um_suffix', value: nameResult.suffix });
+        formData.um_suffix = nameResult.suffix;
       }
       
-      // Add the combined name field if you need it
       if (nameResult.firstName || nameResult.lastName) {
-        nameFields.push({ 
-          name: 'um_name', 
-          value: `${nameResult.firstName || ''} ${nameResult.lastName || ''}`.trim() 
-        });
+        formData.um_name = `${nameResult.firstName || ''} ${nameResult.lastName || ''}`.trim();
       }
-      
-      fields.push(...nameFields);
     }
     
-    // Add phone validation results if present
+    // Add phone validation results
     if (validationResults.phone && !validationResults.phone.error) {
       const phoneResult = validationResults.phone;
-      fields.push(
-        { name: 'um_phone1', value: phoneResult.formatted || '' },
-        { name: 'um_phone1_status', value: phoneResult.isValid ? 'Valid' : 'Invalid' },
-        { name: 'um_phone1_country_code', value: phoneResult.countryCode || '' },
-        { name: 'um_phone1_is_mobile', value: phoneResult.isMobile ? 'true' : 'false' }
-      );
+      formData.um_phone = phoneResult.formatted || '';
+      formData.um_phone_status = phoneResult.isValid ? 'Valid' : 'Invalid';
+      formData.um_phone_type = phoneResult.type || 'unknown';
+      formData.um_phone_country_code = phoneResult.countryCode || '';
+      formData.um_is_mobile = phoneResult.isMobile ? 'Yes' : 'No';
     }
     
-    // Add address validation results if present
+    // Add address validation results
     if (validationResults.address && !validationResults.address.error) {
       const addressResult = validationResults.address;
-      // Only add um_ prefixed address fields
-      const addressFields = [
-        { name: 'um_address_line_1', value: addressResult.line1 || '' },
-        { name: 'um_city', value: addressResult.city || '' },
-        { name: 'um_state_province', value: addressResult.state || '' },
-        { name: 'um_postal_code', value: addressResult.postalCode || '' },
-        { name: 'um_country', value: addressResult.country || '' },
-        { name: 'um_address_status', value: addressResult.isValid ? 'Valid' : 'Invalid' }
-      ];
+      formData.um_house_number = addressResult.houseNumber || '';
+      formData.um_street_name = addressResult.streetName || '';
+      formData.um_street_type = addressResult.streetType || '';
+      formData.um_street_direction = addressResult.streetDirection || '';
+      formData.um_unit_type = addressResult.unitType || '';
+      formData.um_unit_number = addressResult.unitNumber || '';
+      formData.um_city = addressResult.city || '';
+      formData.um_state_province = addressResult.state || '';
+      formData.um_postal_code = addressResult.postalCode || '';
+      formData.um_country = addressResult.country || '';
+      formData.um_country_code = addressResult.countryCode || '';
+      formData.um_address_status = addressResult.isValid ? 'Valid' : 'Invalid';
+      formData.um_formatted_address = addressResult.formatted || '';
       
-      fields.push(...addressFields);
+      if (addressResult.latitude && addressResult.longitude) {
+        formData.um_latitude = String(addressResult.latitude);
+        formData.um_longitude = String(addressResult.longitude);
+      }
     }
     
-    // Filter out any empty values to avoid form errors
-    return fields.filter(field => field.value !== null && field.value !== undefined && field.value !== '');
+    // Remove any null or undefined values
+    Object.keys(formData).forEach(key => {
+      if (formData[key] === null || formData[key] === undefined || formData[key] === '') {
+        delete formData[key];
+      }
+    });
+    
+    return formData;
   }
   
   // Generate UM check ID
@@ -702,6 +756,20 @@ class QueueService {
       );
     }
     
+    if (validationResults.phone && !validationResults.phone.error) {
+      promises.push(
+        clientService.incrementUsage(clientId, 'phone')
+          .catch(err => this.logger.error('Failed to update phone rate limit', err))
+      );
+    }
+    
+    if (validationResults.address && !validationResults.address.error) {
+      promises.push(
+        clientService.incrementUsage(clientId, 'address')
+          .catch(err => this.logger.error('Failed to update address rate limit', err))
+      );
+    }
+    
     await Promise.all(promises);
   }
   
@@ -717,13 +785,15 @@ class QueueService {
       
       const updates = {
         status,
+        updated_at: new Date().toISOString(),
         ...additionalData
       };
       
       const result = await db.update(
         'hubspot_webhook_queue',
         updates,
-        { id: itemId }
+        { id: itemId },
+        { returning: true }
       );
       
       // Log the result
@@ -815,31 +885,36 @@ class QueueService {
     }
   }
   
-  // Get queue statistics
+  // Get queue statistics using Supabase query builder
   async getQueueStats() {
     try {
-      const { rows } = await db.query(`
-        SELECT 
-          status, 
-          COUNT(*) as count
-        FROM hubspot_webhook_queue
-        GROUP BY status
-      `);
+      // Get counts by status
+      const result = await db.executeWithRetry(async (supabase) => {
+        const { data, error } = await supabase
+          .from('hubspot_webhook_queue')
+          .select('status', { count: 'exact' });
+        
+        if (error) throw error;
+        
+        // Group by status manually since Supabase doesn't support GROUP BY in select
+        const statusCounts = {};
+        for (const row of (data || [])) {
+          statusCounts[row.status] = (statusCounts[row.status] || 0) + 1;
+        }
+        
+        return statusCounts;
+      });
       
       const stats = {
-        pending: 0,
-        processing: 0,
-        completed: 0,
-        failed: 0,
+        pending: result.pending || 0,
+        processing: result.processing || 0,
+        completed: result.completed || 0,
+        failed: result.failed || 0,
         total: 0
       };
       
-      rows.forEach(row => {
-        const status = row.status.toLowerCase();
-        const count = parseInt(row.count);
-        stats[status] = count;
-        stats.total += count;
-      });
+      // Calculate total
+      stats.total = Object.values(stats).reduce((sum, count) => sum + count, 0);
       
       return {
         ...stats,
@@ -855,21 +930,15 @@ class QueueService {
   
   /**
    * Check queue status with alerting
-   * Enhanced version of getQueueStats with alert functionality
    */
   async checkQueueStatus() {
     try {
       this.logger.debug('Checking queue status');
       
-      // Query for queue stats
-      const { rows } = await db.query(`
-        SELECT 
-          status, 
-          COUNT(*) as count,
-          MAX(EXTRACT(EPOCH FROM (NOW() - created_at))) as oldest_seconds
-        FROM hubspot_webhook_queue
-        GROUP BY status
-      `);
+      // Get all queue items to analyze
+      const result = await db.select('hubspot_webhook_queue', {}, {
+        columns: 'status, created_at'
+      });
       
       // Process results
       const stats = {
@@ -881,10 +950,13 @@ class QueueService {
         timestamp: new Date().toISOString()
       };
       
-      rows.forEach(row => {
-        stats[row.status.toLowerCase()] = parseInt(row.count);
-        if (row.oldest_seconds > stats.oldest) {
-          stats.oldest = row.oldest_seconds;
+      const now = Date.now();
+      result.rows.forEach(row => {
+        stats[row.status.toLowerCase()] = (stats[row.status.toLowerCase()] || 0) + 1;
+        
+        const ageSeconds = (now - new Date(row.created_at).getTime()) / 1000;
+        if (ageSeconds > stats.oldest) {
+          stats.oldest = ageSeconds;
         }
       });
       
@@ -922,33 +994,52 @@ class QueueService {
   }
 
   /**
-   * Reset stalled queue items
+   * Reset stalled queue items using Supabase query builder
    */
   async resetStalledItems() {
     try {
       this.logger.info('Resetting stalled queue items');
       
       const stalledThresholdMinutes = config.queue?.stalledThresholdMinutes || 30;
+      const cutoffTime = new Date(Date.now() - stalledThresholdMinutes * 60 * 1000).toISOString();
       
-      // Find and reset stalled items
-      const { rowCount } = await db.query(
-        `UPDATE hubspot_webhook_queue
-         SET 
-           status = 'pending',
-           processing_started_at = NULL,
-           next_retry_at = NOW(),
-           attempts = attempts + 1
-         WHERE 
-           status = 'processing'
-           AND processing_started_at < NOW() - INTERVAL $1
-           AND attempts < max_attempts`,
-        [`${stalledThresholdMinutes} minutes`]
-      );
+      // Find stalled items
+      const stalledItems = await db.executeWithRetry(async (supabase) => {
+        const { data, error } = await supabase
+          .from('hubspot_webhook_queue')
+          .select('id, attempts, max_attempts')
+          .eq('status', 'processing')
+          .lt('processing_started_at', cutoffTime)
+          .lt('attempts', db.raw('max_attempts'));
+        
+        if (error) throw error;
+        return data || [];
+      });
       
-      this.logger.info(`Reset ${rowCount} stalled queue items`);
+      // Reset each stalled item
+      let resetCount = 0;
+      for (const item of stalledItems) {
+        try {
+          await db.update(
+            'hubspot_webhook_queue',
+            {
+              status: 'pending',
+              processing_started_at: null,
+              next_retry_at: new Date().toISOString(),
+              attempts: item.attempts + 1
+            },
+            { id: item.id }
+          );
+          resetCount++;
+        } catch (error) {
+          this.logger.error('Failed to reset stalled item', { itemId: item.id, error });
+        }
+      }
+      
+      this.logger.info(`Reset ${resetCount} stalled queue items`);
       
       return {
-        resetCount: rowCount || 0
+        resetCount
       };
     } catch (error) {
       this.logger.error('Error resetting stalled queue items', error);
@@ -957,27 +1048,49 @@ class QueueService {
   }
 
   /**
-   * Clean up old completed queue items
+   * Clean up old completed queue items using Supabase query builder
    */
   async cleanupCompletedItems() {
     try {
       this.logger.info('Cleaning up old completed queue items');
       
       const retentionDays = config.queue?.completedRetentionDays || 30;
+      const cutoffDate = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
       
-      // Delete old completed items
-      const { rowCount } = await db.query(
-        `DELETE FROM hubspot_webhook_queue
-         WHERE 
-           status = 'completed'
-           AND processing_completed_at < NOW() - INTERVAL $1`,
-        [`${retentionDays} days`]
-      );
+      // Find old completed items
+      const oldItems = await db.executeWithRetry(async (supabase) => {
+        const { data, error } = await supabase
+          .from('hubspot_webhook_queue')
+          .select('id')
+          .eq('status', 'completed')
+          .lt('processing_completed_at', cutoffDate);
+        
+        if (error) throw error;
+        return data || [];
+      });
       
-      this.logger.info(`Cleaned up ${rowCount} old completed queue items`);
+      // Delete each old item
+      let deletedCount = 0;
+      for (const item of oldItems) {
+        try {
+          await db.executeWithRetry(async (supabase) => {
+            const { error } = await supabase
+              .from('hubspot_webhook_queue')
+              .delete()
+              .eq('id', item.id);
+            
+            if (error) throw error;
+          });
+          deletedCount++;
+        } catch (error) {
+          this.logger.error('Failed to delete old item', { itemId: item.id, error });
+        }
+      }
+      
+      this.logger.info(`Cleaned up ${deletedCount} old completed queue items`);
       
       return {
-        deletedCount: rowCount || 0
+        deletedCount
       };
     } catch (error) {
       this.logger.error('Error cleaning up completed queue items', error);
@@ -995,34 +1108,44 @@ class QueueService {
     return this.processPendingItems({ batchSize: limit });
   }
   
-  // Get failed items with pagination
+  // Process a batch of queue items
+  async processQueueBatch(limit = 10) {
+    return this.processPendingItems({ batchSize: limit });
+  }
+  
+  // Get failed items with pagination using Supabase query builder
   async getFailedItems(page = 1, limit = 20) {
     try {
       const offset = (page - 1) * limit;
       
       // Get total count
-      const countResult = await db.query(
-        'SELECT COUNT(*) as total FROM hubspot_webhook_queue WHERE status = $1',
-        ['failed']
-      );
-      const total = parseInt(countResult.rows[0].total);
+      const countResult = await db.executeWithRetry(async (supabase) => {
+        const { count, error } = await supabase
+          .from('hubspot_webhook_queue')
+          .select('*', { count: 'exact', head: true })
+          .eq('status', 'failed');
+        
+        if (error) throw error;
+        return count || 0;
+      });
       
       // Get paginated results
-      const { rows } = await db.query(
-        `SELECT * FROM hubspot_webhook_queue 
-         WHERE status = $1 
-         ORDER BY created_at DESC 
-         LIMIT $2 OFFSET $3`,
-        ['failed', limit, offset]
+      const result = await db.select('hubspot_webhook_queue', 
+        { status: 'failed' },
+        {
+          order: { column: 'created_at', ascending: false },
+          limit,
+          offset
+        }
       );
       
       return {
-        items: rows,
+        items: result.rows,
         pagination: {
           page,
           limit,
-          total,
-          pages: Math.ceil(total / limit)
+          total: countResult,
+          pages: Math.ceil(countResult / limit)
         }
       };
     } catch (error) {
