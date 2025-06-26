@@ -104,8 +104,8 @@ class QueueService {
         needs_phone_validation: eventData.needs_phone_validation || false,
         needs_address_validation: eventData.needs_address_validation || false,
         event_data: eventData.event_data,
-        contact_data: eventData.contact_data,
-        created_at: new Date().toISOString()
+        contact_data: eventData.contact_data
+        // Note: created_at is handled by database DEFAULT
       };
       
       const { rows } = await db.insert('hubspot_webhook_queue', queueItem, {
@@ -797,7 +797,6 @@ class QueueService {
       
       const updates = {
         status,
-        updated_at: new Date().toISOString(),
         ...additionalData
       };
       
