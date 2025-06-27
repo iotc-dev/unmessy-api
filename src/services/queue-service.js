@@ -606,64 +606,63 @@ class QueueService {
   }
   
   // Submit validation results to HubSpot
-  // Submit validation results to HubSpot
-async submitToHubSpot(item, contactData, validationResults) {
-  try {
-    // Get client's HubSpot config
-    const hubspotConfig = await clientService.getClientHubSpotConfig(item.client_id);
-    
-    if (!hubspotConfig?.enabled || !hubspotConfig.portalId || !hubspotConfig.formGuid) {
-      throw new Error('HubSpot form submission not configured');
-    }
-    
-    // Build form fields with proper structure
-    const formData = this.buildFormData(item, contactData, validationResults, item.client_id);
-    
-    // Debug log the form data being submitted - show actual structure
-    this.logger.info('Submitting form data to HubSpot', {
-      formGuid: hubspotConfig.formGuid,
-      contactId: item.object_id,
-      fieldCount: formData.fields.length,
-      fieldNames: formData.fields.map(f => f.name),
-      // Log a sample of the fields structure for debugging
-      sampleFields: formData.fields.slice(0, 3).map(f => ({ name: f.name, value: f.value }))
-    });
-    
-    // Submit to HubSpot with contact association
-    const result = await hubspotService.submitForm(
-      formData, // Pass the whole formData object with { fields: [...] } structure
-      hubspotConfig.portalId,
-      hubspotConfig.formGuid,
-      {
-        objectId: item.object_id, // Associate with the contact
-        skipValidation: true, // Handle field mismatches gracefully
-        pageUri: 'https://unmessy-api.vercel.app/queue-processor',
-        pageName: 'Unmessy Queue Processor'
+  async submitToHubSpot(item, contactData, validationResults) {
+    try {
+      // Get client's HubSpot config
+      const hubspotConfig = await clientService.getClientHubSpotConfig(item.client_id);
+      
+      if (!hubspotConfig?.enabled || !hubspotConfig.portalId || !hubspotConfig.formGuid) {
+        throw new Error('HubSpot form submission not configured');
       }
-    );
-    
-    // Update rate limits
-    await this.updateRateLimits(item.client_id, validationResults);
-    
-    return result;
-  } catch (error) {
-    // If form fields don't match, log but don't fail
-    if (error.message?.includes('field') || error.message?.includes('property')) {
-      this.logger.warn('Form field mismatch, some fields may not have been submitted', {
-        itemId: item.id,
+      
+      // Build form fields with proper structure
+      const formData = this.buildFormData(item, contactData, validationResults, item.client_id);
+      
+      // Debug log the form data being submitted - show actual structure
+      this.logger.info('Submitting form data to HubSpot', {
+        formGuid: hubspotConfig.formGuid,
         contactId: item.object_id,
-        error: error.message
+        fieldCount: formData.fields.length,
+        fieldNames: formData.fields.map(f => f.name),
+        // Log a sample of the fields structure for debugging
+        sampleFields: formData.fields.slice(0, 3).map(f => ({ name: f.name, value: f.value }))
       });
-      return { success: true, warning: 'partial_submission' };
+      
+      // Submit to HubSpot with contact association
+      const result = await hubspotService.submitForm(
+        formData, // Pass the whole formData object with { fields: [...] } structure
+        hubspotConfig.portalId,
+        hubspotConfig.formGuid,
+        {
+          objectId: item.object_id, // Associate with the contact
+          skipValidation: true, // Handle field mismatches gracefully
+          pageUri: 'https://unmessy-api.vercel.app/queue-processor',
+          pageName: 'Unmessy Queue Processor'
+        }
+      );
+      
+      // Update rate limits
+      await this.updateRateLimits(item.client_id, validationResults);
+      
+      return result;
+    } catch (error) {
+      // If form fields don't match, log but don't fail
+      if (error.message?.includes('field') || error.message?.includes('property')) {
+        this.logger.warn('Form field mismatch, some fields may not have been submitted', {
+          itemId: item.id,
+          contactId: item.object_id,
+          error: error.message
+        });
+        return { success: true, warning: 'partial_submission' };
+      }
+      
+      this.logger.error('Failed to submit to HubSpot', error, {
+        itemId: item.id,
+        contactId: item.object_id
+      });
+      throw error;
     }
-    
-    this.logger.error('Failed to submit to HubSpot', error, {
-      itemId: item.id,
-      contactId: item.object_id
-    });
-    throw error;
   }
-}
   
   // Build form data for HubSpot submission with proper fields array structure
   buildFormData(item, contactData, validationResults, clientId) {
@@ -1366,4 +1365,4 @@ async submitToHubSpot(item, contactData, validationResults) {
 const queueService = new QueueService();
 
 // Export both the instance and the class
-export { queueService as default, QueueService };s
+export { queueService as default, QueueService };
