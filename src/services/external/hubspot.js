@@ -250,35 +250,50 @@ class HubSpotService {
     // Build URL
     const url = `https://api.hsforms.com/submissions/v3/integration/submit/${portalId}/${formGuid}`;
     
-    // Filter and format form fields, handling mismatches gracefully
-    const fields = [];
+    // Check if formData already has the fields array structure
+    let fields = [];
     
-    Object.entries(formData).forEach(([name, value]) => {
-      try {
-        // Skip null, undefined, or function values
-        if (value === null || value === undefined || typeof value === 'function') {
-          this.logger.debug(`Skipping field ${name} with invalid value type`);
-          return;
+    if (formData.fields && Array.isArray(formData.fields)) {
+      // Already in correct format
+      fields = formData.fields;
+    } else {
+      // Convert flat object to fields array
+      Object.entries(formData).forEach(([name, value]) => {
+        try {
+          // Skip null, undefined, or function values
+          if (value === null || value === undefined || typeof value === 'function') {
+            this.logger.debug(`Skipping field ${name} with invalid value type`);
+            return;
+          }
+          
+          // Convert arrays and objects to strings
+          let fieldValue = value;
+          if (Array.isArray(value)) {
+            fieldValue = value.join(', ');
+          } else if (typeof value === 'object') {
+            fieldValue = JSON.stringify(value);
+          } else {
+            fieldValue = String(value);
+          }
+          
+          // Fix epoch timestamp if it's the date_last_um_check_epoch field
+          if (name === 'date_last_um_check_epoch') {
+            // Ensure it's a Unix timestamp in seconds, not milliseconds
+            const timestamp = parseInt(fieldValue);
+            if (timestamp > 9999999999) { // If it's in milliseconds
+              fieldValue = Math.floor(timestamp / 1000).toString();
+            }
+          }
+          
+          fields.push({
+            name,
+            value: fieldValue
+          });
+        } catch (error) {
+          this.logger.warn(`Error processing field ${name}, skipping`, { error: error.message });
         }
-        
-        // Convert arrays and objects to strings
-        let fieldValue = value;
-        if (Array.isArray(value)) {
-          fieldValue = value.join(', ');
-        } else if (typeof value === 'object') {
-          fieldValue = JSON.stringify(value);
-        } else {
-          fieldValue = String(value);
-        }
-        
-        fields.push({
-          name,
-          value: fieldValue
-        });
-      } catch (error) {
-        this.logger.warn(`Error processing field ${name}, skipping`, { error: error.message });
-      }
-    });
+      });
+    }
     
     // Build the payload
     const payload = {
@@ -327,6 +342,15 @@ class HubSpotService {
       body: JSON.stringify(payload)
     };
     
+    // Log the payload for debugging
+    this.logger.debug('Submitting form data to HubSpot', {
+      portalId,
+      formGuid,
+      fieldCount: fields.length,
+      fieldNames: fields.map(f => f.name),
+      hasObjectId: !!objectId
+    });
+    
     // Execute with circuit breaker
     try {
       const requestData = {
@@ -360,6 +384,13 @@ class HubSpotService {
       if (error instanceof HubSpotError && error.statusCode === 400) {
         // Try to parse the error for field-specific issues
         const errorMessage = error.message.toLowerCase();
+        
+        this.logger.error('HubSpot form submission failed with 400 error', {
+          formGuid,
+          error: error.message,
+          submittedFields: fields.map(f => ({ name: f.name, value: f.value })),
+          payload: JSON.stringify(payload)
+        });
         
         if (errorMessage.includes('field') || errorMessage.includes('property')) {
           this.logger.warn('Form field mismatch detected', {

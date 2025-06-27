@@ -615,15 +615,15 @@ class QueueService {
         throw new Error('HubSpot form submission not configured');
       }
       
-      // Build form fields - only um_ properties
-      const formData = this.buildFormData(contactData, validationResults, item.client_id);
+      // Build form fields with proper structure
+      const formData = this.buildFormData(item, contactData, validationResults, item.client_id);
       
       // Debug log the form data being submitted
       this.logger.info('Submitting form data to HubSpot', {
         formGuid: hubspotConfig.formGuid,
         contactId: item.object_id,
-        fields: Object.keys(formData),
-        formData: JSON.stringify(formData, null, 2)
+        fieldCount: formData.fields.length,
+        fieldNames: formData.fields.map(f => f.name)
       });
       
       // Submit to HubSpot with contact association
@@ -662,57 +662,114 @@ class QueueService {
     }
   }
   
-  // Build form data for HubSpot submission
-  buildFormData(contactData, validationResults, clientId) {
-    const formData = {};
+  // Build form data for HubSpot submission with proper fields array structure
+  buildFormData(item, contactData, validationResults, clientId) {
+    const fields = [];
     
     // Always include UM check ID and epoch
     const epochMs = Date.now();
     const umCheckId = this.generateUmCheckId(clientId, epochMs);
     
-    formData.date_last_um_check_epoch = String(epochMs);
-    formData.um_check_id = String(umCheckId);
+    // Fix epoch to be in seconds, not milliseconds
+    fields.push({
+      name: 'date_last_um_check_epoch',
+      value: Math.floor(epochMs / 1000).toString()
+    });
     
-    // IMPORTANT: Include native email field if it exists in the contact
-    // This is required by the form but won't trigger webhooks since we're not changing it
+    fields.push({
+      name: 'um_check_id',
+      value: String(umCheckId)
+    });
+    
+    // Add original contact fields (firstname, lastname, email)
     if (contactData?.properties?.email) {
-      formData.email = contactData.properties.email;
+      fields.push({
+        name: 'email',
+        value: contactData.properties.email
+      });
     }
     
-    // Add email validation results (um_ fields only)
+    if (item.contact_firstname || contactData?.properties?.firstname) {
+      fields.push({
+        name: 'firstname',
+        value: item.contact_firstname || contactData.properties.firstname || ''
+      });
+    }
+    
+    if (item.contact_lastname || contactData?.properties?.lastname) {
+      fields.push({
+        name: 'lastname',
+        value: item.contact_lastname || contactData.properties.lastname || ''
+      });
+    }
+    
+    // Add email validation results (um_ fields)
     if (validationResults.email && !validationResults.email.error) {
       const emailResult = validationResults.email;
-      formData.um_email = emailResult.currentEmail || emailResult.um_email || contactData?.properties?.email || '';
-      formData.um_email_status = emailResult.um_email_status || 'Unchanged';
-      formData.um_bounce_status = emailResult.um_bounce_status || 'Unknown';
+      fields.push({
+        name: 'um_email',
+        value: emailResult.currentEmail || emailResult.um_email || contactData?.properties?.email || ''
+      });
+      fields.push({
+        name: 'um_email_status',
+        value: emailResult.um_email_status || 'Unchanged'
+      });
+      fields.push({
+        name: 'um_bounce_status',
+        value: emailResult.um_bounce_status || 'Unknown'
+      });
     }
     
-    // Add name validation results (um_ fields only)
+    // Add name validation results (um_ fields)
     if (validationResults.name && !validationResults.name.error) {
       const nameResult = validationResults.name;
-      formData.um_first_name = nameResult.firstName || contactData?.properties?.firstname || '';
-      formData.um_last_name = nameResult.lastName || contactData?.properties?.lastname || '';
-      formData.um_name_status = nameResult.wasCorrected ? 'Changed' : 'Unchanged';
-      formData.um_name_format = nameResult.formatValid ? 'Valid' : 'Invalid';
+      fields.push({
+        name: 'um_first_name',
+        value: nameResult.firstName || ''
+      });
+      fields.push({
+        name: 'um_last_name',
+        value: nameResult.lastName || ''
+      });
+      fields.push({
+        name: 'um_name_status',
+        value: nameResult.wasCorrected ? 'Changed' : 'Unchanged'
+      });
+      fields.push({
+        name: 'um_name_format',
+        value: nameResult.formatValid ? 'Valid' : 'Invalid'
+      });
       
       if (nameResult.middleName) {
-        formData.um_middle_name = nameResult.middleName;
+        fields.push({
+          name: 'um_middle_name',
+          value: nameResult.middleName
+        });
       }
       
       if (nameResult.honorific) {
-        formData.um_honorific = nameResult.honorific;
+        fields.push({
+          name: 'um_honorific',
+          value: nameResult.honorific
+        });
       }
       
       if (nameResult.suffix) {
-        formData.um_suffix = nameResult.suffix;
+        fields.push({
+          name: 'um_suffix',
+          value: nameResult.suffix
+        });
       }
       
       if (nameResult.firstName || nameResult.lastName) {
-        formData.um_name = `${nameResult.firstName || ''} ${nameResult.lastName || ''}`.trim();
+        fields.push({
+          name: 'um_name',
+          value: `${nameResult.firstName || ''} ${nameResult.lastName || ''}`.trim()
+        });
       }
     }
     
-    // Add phone validation results (um_ fields only)
+    // Add phone validation results (um_ fields)
     if (validationResults.phone && !validationResults.phone.error) {
       const phoneResult = validationResults.phone;
       
@@ -722,20 +779,56 @@ class QueueService {
       
       if (usePhone2) {
         // Use um_phone2 fields if um_phone1 already has a value
-        formData.um_phone2 = phoneResult.formatted || '';
-        formData.um_phone2_status = phoneResult.isValid ? 'Valid' : 'Invalid';
-        formData.um_phone_2_format = phoneResult.type || 'unknown';
-        formData.um_phone2_country_code = phoneResult.countryCode || '';
-        formData.um_phone2_is_mobile = phoneResult.isMobile ? 'Yes' : 'No';
-        formData.um_phone2_country = phoneResult.country || '';
+        fields.push({
+          name: 'um_phone2',
+          value: phoneResult.formatted || ''
+        });
+        fields.push({
+          name: 'um_phone2_status',
+          value: phoneResult.isValid ? 'Valid' : 'Invalid'
+        });
+        fields.push({
+          name: 'um_phone_2_format',
+          value: phoneResult.type || 'unknown'
+        });
+        fields.push({
+          name: 'um_phone2_country_code',
+          value: phoneResult.countryCode || ''
+        });
+        fields.push({
+          name: 'um_phone2_is_mobile',
+          value: phoneResult.isMobile ? 'Yes' : 'No'
+        });
+        fields.push({
+          name: 'um_phone2_country',
+          value: phoneResult.country || ''
+        });
       } else {
         // Default to um_phone1 fields
-        formData.um_phone1 = phoneResult.formatted || '';
-        formData.um_phone1_status = phoneResult.isValid ? 'Valid' : 'Invalid';
-        formData.um_phone1_format = phoneResult.type || 'unknown';
-        formData.um_phone1_country_code = phoneResult.countryCode || '';
-        formData.um_phone1_is_mobile = phoneResult.isMobile ? 'Yes' : 'No';
-        formData.um_phone1_country = phoneResult.country || '';
+        fields.push({
+          name: 'um_phone1',
+          value: phoneResult.formatted || ''
+        });
+        fields.push({
+          name: 'um_phone1_status',
+          value: phoneResult.isValid ? 'Valid' : 'Invalid'
+        });
+        fields.push({
+          name: 'um_phone1_format',
+          value: phoneResult.type || 'unknown'
+        });
+        fields.push({
+          name: 'um_phone1_country_code',
+          value: phoneResult.countryCode || ''
+        });
+        fields.push({
+          name: 'um_phone1_is_mobile',
+          value: phoneResult.isMobile ? 'Yes' : 'No'
+        });
+        fields.push({
+          name: 'um_phone1_country',
+          value: phoneResult.country || ''
+        });
       }
       
       this.logger.info('Phone validation mapped to field', {
@@ -748,34 +841,45 @@ class QueueService {
     // Add address validation results
     if (validationResults.address && !validationResults.address.error) {
       const addressResult = validationResults.address;
-      formData.um_house_number = addressResult.houseNumber || '';
-      formData.um_street_name = addressResult.streetName || '';
-      formData.um_street_type = addressResult.streetType || '';
-      formData.um_street_direction = addressResult.streetDirection || '';
-      formData.um_unit_type = addressResult.unitType || '';
-      formData.um_unit_number = addressResult.unitNumber || '';
-      formData.um_city = addressResult.city || '';
-      formData.um_state_province = addressResult.state || '';
-      formData.um_postal_code = addressResult.postalCode || '';
-      formData.um_country = addressResult.country || '';
-      formData.um_country_code = addressResult.countryCode || '';
-      formData.um_address_status = addressResult.isValid ? 'Valid' : 'Invalid';
-      formData.um_formatted_address = addressResult.formatted || '';
+      
+      const addressFields = [
+        { name: 'um_house_number', value: addressResult.houseNumber || '' },
+        { name: 'um_street_name', value: addressResult.streetName || '' },
+        { name: 'um_street_type', value: addressResult.streetType || '' },
+        { name: 'um_street_direction', value: addressResult.streetDirection || '' },
+        { name: 'um_unit_type', value: addressResult.unitType || '' },
+        { name: 'um_unit_number', value: addressResult.unitNumber || '' },
+        { name: 'um_city', value: addressResult.city || '' },
+        { name: 'um_state_province', value: addressResult.state || '' },
+        { name: 'um_postal_code', value: addressResult.postalCode || '' },
+        { name: 'um_country', value: addressResult.country || '' },
+        { name: 'um_country_code', value: addressResult.countryCode || '' },
+        { name: 'um_address_status', value: addressResult.isValid ? 'Valid' : 'Invalid' },
+        { name: 'um_formatted_address', value: addressResult.formatted || '' }
+      ];
+      
+      addressFields.forEach(field => {
+        if (field.value) {
+          fields.push(field);
+        }
+      });
       
       if (addressResult.latitude && addressResult.longitude) {
-        formData.um_latitude = String(addressResult.latitude);
-        formData.um_longitude = String(addressResult.longitude);
+        fields.push({
+          name: 'um_latitude',
+          value: String(addressResult.latitude)
+        });
+        fields.push({
+          name: 'um_longitude',
+          value: String(addressResult.longitude)
+        });
       }
     }
     
-    // Remove any null or undefined values
-    Object.keys(formData).forEach(key => {
-      if (formData[key] === null || formData[key] === undefined || formData[key] === '') {
-        delete formData[key];
-      }
-    });
-    
-    return formData;
+    // Return in the format expected by HubSpot service
+    return {
+      fields: fields.filter(field => field.value !== null && field.value !== undefined && field.value !== '')
+    };
   }
   
   // Generate UM check ID
@@ -1259,4 +1363,4 @@ class QueueService {
 const queueService = new QueueService();
 
 // Export both the instance and the class
-export { queueService as default, QueueService };
+export { queueService as default, QueueService };s
