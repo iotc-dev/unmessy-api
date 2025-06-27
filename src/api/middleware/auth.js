@@ -7,6 +7,9 @@ import clientService from '../../services/client-service.js';
 // Create logger instance
 const logger = createServiceLogger('auth-middleware');
 
+// Default API key header name
+const API_KEY_HEADER = 'x-api-key';
+
 /**
  * Extract API key from request
  * @param {Object} req - Express request object
@@ -14,9 +17,20 @@ const logger = createServiceLogger('auth-middleware');
  */
 function extractApiKey(req) {
   // Check for API key in header (preferred method)
-  const headerKey = req.headers[config.clients.apiKeyHeader.toLowerCase()];
+  // Use the default header name or get from config if available
+  const headerName = config.clients?.apiKeyHeader || API_KEY_HEADER;
+  const headerKey = req.headers[headerName.toLowerCase()];
   if (headerKey) {
     return headerKey;
+  }
+  
+  // Also check for common variations
+  if (req.headers['api-key']) {
+    return req.headers['api-key'];
+  }
+  
+  if (req.headers['apikey']) {
+    return req.headers['apikey'];
   }
   
   // Check for API key in query string (fallback)
@@ -51,7 +65,12 @@ function authMiddleware(options = {}) {
       
       // If auth is required and no API key is provided, reject
       if (required && !apiKey) {
-        throw new AuthenticationError('API key is required');
+        logger.warn('No API key provided', {
+          path: req.path,
+          method: req.method,
+          headers: Object.keys(req.headers).filter(h => h.toLowerCase().includes('api'))
+        });
+        throw new AuthenticationError('API key is required. Please provide it in the X-API-Key header, api_key query parameter, or api_key in the request body.');
       }
       
       // If no API key provided but not required, continue
@@ -65,7 +84,7 @@ function authMiddleware(options = {}) {
       
       if (!valid) {
         logger.warn('Invalid API key attempted', { 
-          apiKey: apiKey.substring(0, 4) + '****', 
+          apiKey: apiKey ? apiKey.substring(0, 4) + '****' : 'none',
           error 
         });
         throw new InvalidApiKeyError(error || 'Invalid API key');
@@ -73,6 +92,11 @@ function authMiddleware(options = {}) {
       
       // Get client details
       const client = await clientService.getClient(clientId);
+      
+      if (!client) {
+        logger.error('Client not found after successful API key validation', { clientId });
+        throw new AuthenticationError('Client configuration error');
+      }
       
       // Check if client is active
       if (!client.active) {
@@ -104,4 +128,4 @@ function authMiddleware(options = {}) {
 }
 
 // Export middleware factory and utilities
-export { authMiddleware, extractApiKey };
+export { authMiddleware, extractApiKey, API_KEY_HEADER };
