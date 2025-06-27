@@ -80,6 +80,15 @@ function authMiddleware(options = {}) {
       }
       
       // Validate API key and get client info
+      if (!clientService || typeof clientService.validateApiKey !== 'function') {
+        logger.error('Client service not properly initialized', {
+          hasClientService: !!clientService,
+          type: typeof clientService,
+          methods: clientService ? Object.getOwnPropertyNames(Object.getPrototypeOf(clientService)) : []
+        });
+        throw new AuthenticationError('Service initialization error');
+      }
+      
       const { valid, clientId, error } = await clientService.validateApiKey(apiKey);
       
       if (!valid) {

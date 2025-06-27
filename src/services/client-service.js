@@ -3,6 +3,7 @@ import db from '../core/db.js';
 import { config } from '../core/config.js';
 import { createServiceLogger } from '../core/logger.js';
 import { 
+  AuthenticationError,
   DatabaseError, 
   ValidationError,
   RateLimitError 
@@ -16,6 +17,99 @@ class ClientService {
     this.clientCache = new Map();
     this.clientConfigCache = new Map();
     this.cacheTimeout = 300000; // 5 minutes
+    
+    // Cache for API key mappings
+    this.apiKeyCache = new Map();
+    
+    // Initialize API keys from environment on startup
+    this.loadApiKeysFromEnv();
+  }
+  
+  // Load API keys from environment variables
+  loadApiKeysFromEnv() {
+    try {
+      // Check if config.clients exists and has getAll method
+      if (!config.clients || typeof config.clients.getAll !== 'function') {
+        this.logger.warn('Config clients not properly initialized', {
+          hasClients: !!config.clients,
+          type: typeof config.clients
+        });
+        
+        // Fallback: Try to load directly from environment
+        for (let i = 1; i <= 10; i++) {
+          const key = process.env[`CLIENT_${i}_KEY`];
+          const id = process.env[`CLIENT_${i}_ID`];
+          
+          if (key && id) {
+            this.apiKeyCache.set(key, id);
+            this.logger.info(`Loaded client ${i} from env directly: ID=${id}`);
+          }
+        }
+        
+        return;
+      }
+      
+      const clients = config.clients.getAll();
+      
+      for (const [apiKey, client] of clients) {
+        this.apiKeyCache.set(apiKey, client.id || client);
+        this.logger.info('API key loaded for client', { 
+          clientId: client.id || client
+        });
+      }
+      
+      this.logger.info('API keys loaded from environment', {
+        totalKeys: this.apiKeyCache.size
+      });
+    } catch (error) {
+      this.logger.error('Failed to load API keys from environment', error);
+      
+      // Fallback: Try to load directly from environment
+      try {
+        for (let i = 1; i <= 10; i++) {
+          const key = process.env[`CLIENT_${i}_KEY`];
+          const id = process.env[`CLIENT_${i}_ID`];
+          
+          if (key && id) {
+            this.apiKeyCache.set(key, id);
+            this.logger.info(`Loaded client ${i} from env directly: ID=${id}`);
+          }
+        }
+      } catch (fallbackError) {
+        this.logger.error('Fallback loading also failed', fallbackError);
+      }
+    }
+  }
+  
+  // Validate API key and return client ID
+  async validateApiKey(apiKey) {
+    if (!apiKey) {
+      return {
+        valid: false,
+        error: 'API key is required'
+      };
+    }
+    
+    // Check memory cache first
+    const clientId = this.apiKeyCache.get(apiKey);
+    
+    if (!clientId) {
+      this.logger.warn('API key not found in cache', {
+        providedKeyPrefix: apiKey.substring(0, 4) + '****',
+        cachedKeys: this.apiKeyCache.size,
+        availableKeys: Array.from(this.apiKeyCache.keys()).map(k => k.substring(0, 4) + '****')
+      });
+      
+      return {
+        valid: false,
+        error: 'Invalid API key'
+      };
+    }
+    
+    return {
+      valid: true,
+      clientId: clientId
+    };
   }
   
   // Get client by ID
@@ -51,25 +145,22 @@ class ClientService {
     }
   }
   
-  // Get client by API key
+  // Get client by API key (combined validation and retrieval)
   async getClientByApiKey(apiKey) {
     try {
-      // Check if API key matches any configured client
-      const clientEntry = config.clients.getByKey(apiKey);
+      // First validate the API key
+      const validation = await this.validateApiKey(apiKey);
       
-      if (!clientEntry) {
-        this.logger.warn('Invalid API key attempted', { 
-          keyPrefix: apiKey ? apiKey.substring(0, 8) + '...' : 'null' 
-        });
+      if (!validation.valid) {
         return null;
       }
       
       // Get full client data from database
-      const client = await this.getClient(clientEntry.id);
+      const client = await this.getClient(validation.clientId);
       
       if (!client) {
         this.logger.error('Client configured but not found in database', {
-          clientId: clientEntry.id
+          clientId: validation.clientId
         });
         return null;
       }
@@ -189,13 +280,23 @@ class ClientService {
   // Increment usage counter (atomic operation)
   async incrementUsage(clientId, validationType, count = 1) {
     try {
-      // Use the decrement function from database via RPC
-      const { rows } = await db.query('decrement_validation_count', {
-        p_client_id: clientId,
-        p_validation_type: validationType
-      });
+      // Update the remaining count directly
+      const remainingField = `remaining_${validationType}`;
+      const totalField = `total_${validationType}_count`;
       
-      const remaining = rows?.[0]?.result ?? rows?.[0] ?? -1;
+      const query = `
+        UPDATE clients 
+        SET 
+          ${remainingField} = GREATEST(0, ${remainingField} - $2),
+          ${totalField} = ${totalField} + $2,
+          updated_at = NOW()
+        WHERE client_id = $1
+        RETURNING ${remainingField} as remaining
+      `;
+      
+      const result = await db.query(query, [clientId, count]);
+      
+      const remaining = result.rows?.[0]?.remaining ?? -1;
       
       if (remaining === -1) {
         this.logger.warn('Failed to decrement rate limit', {
@@ -226,13 +327,10 @@ class ClientService {
   // Record validation metric
   async recordValidationMetric(clientId, validationType, success, responseTime, errorType = null) {
     try {
-      await db.query('record_validation_metric', {
-        p_client_id: clientId,
-        p_validation_type: validationType,
-        p_success: success,
-        p_response_time_ms: responseTime,
-        p_error_type: errorType
-      });
+      await db.query(
+        'SELECT record_validation_metric($1, $2, $3, $4, $5)',
+        [clientId, validationType, success, responseTime, errorType]
+      );
       
       this.logger.debug('Validation metric recorded', {
         clientId,
@@ -351,7 +449,7 @@ class ClientService {
   async resetDailyLimits() {
     try {
       // Call the stored procedure to reset limits
-      await db.rpc('reset_remaining_counts');
+      await db.query('SELECT reset_remaining_counts()');
       
       // Clear all caches
       this.clientCache.clear();
@@ -424,7 +522,8 @@ class ClientService {
       return {
         status: 'healthy',
         clientCount: rows.length,
-        cacheSize: this.clientCache.size
+        cacheSize: this.clientCache.size,
+        apiKeysLoaded: this.apiKeyCache.size
       };
     } catch (error) {
       return {
