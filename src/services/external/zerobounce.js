@@ -38,7 +38,15 @@ class ZeroBounceService {
       resetTimeout: 60000, // Wait time before trying to close the circuit
       volumeThreshold: 5, // Minimum number of requests needed before tripping circuit
       rollingCountTimeout: 10000, // Time window for error rate calculation
-      rollingCountBuckets: 10 // Number of buckets for stats tracking
+      rollingCountBuckets: 10, // Number of buckets for stats tracking
+      // Add error filter to ensure errors are properly handled
+      errorFilter: (err) => {
+        // Don't count 4xx errors towards circuit breaker threshold
+        if (err && err.statusCode && err.statusCode >= 400 && err.statusCode < 500) {
+          return false;
+        }
+        return true;
+      }
     });
     
     // Add event listeners
@@ -71,16 +79,29 @@ class ZeroBounceService {
       this.logger.info('ZeroBounce circuit breaker closed, service recovered');
     });
     
-    this.circuitBreaker.on('fallback', (result) => {
-      this.logger.warn('ZeroBounce circuit breaker fallback executed');
+    this.circuitBreaker.on('fallback', (data, err) => {
+      this.logger.warn('ZeroBounce circuit breaker fallback executed', {
+        error: err ? err.message : 'unknown error',
+        errorType: err ? err.constructor.name : 'unknown'
+      });
     });
     
-    this.circuitBreaker.on('timeout', () => {
-      this.logger.warn('ZeroBounce request timed out');
+    this.circuitBreaker.on('timeout', (err) => {
+      this.logger.warn('ZeroBounce request timed out', {
+        error: err ? err.message : 'timeout'
+      });
     });
     
     this.circuitBreaker.on('reject', () => {
       this.logger.warn('ZeroBounce request rejected (circuit open)');
+    });
+    
+    this.circuitBreaker.on('failure', (err) => {
+      this.logger.error('ZeroBounce circuit breaker failure', {
+        error: err ? err.message : 'unknown error',
+        errorType: err ? err.constructor.name : 'unknown',
+        stack: err ? err.stack : undefined
+      });
     });
   }
   
@@ -113,23 +134,52 @@ class ZeroBounceService {
       // Execute through circuit breaker
       const result = await this.circuitBreaker.fire(email, ipAddress, timeout);
       
+      // Check if we got a valid result
+      if (!result) {
+        throw new ZeroBounceError('No result from ZeroBounce API', 500);
+      }
+      
       // Cache the result
       this.addToResponseCache(email, result);
       
       return result;
     } catch (error) {
-      // Check if error exists before accessing properties
-      if (error && error.name === 'CircuitBreakerOpen') {
-        throw new ZeroBounceError('ZeroBounce service is temporarily unavailable', 503);
-      }
+      // Log detailed error information
+      this.logger.error('ZeroBounce validation error', {
+        email,
+        errorType: error ? error.constructor.name : 'unknown',
+        errorMessage: error ? error.message : 'unknown error',
+        errorCode: error ? error.code : undefined,
+        errorStatus: error ? error.statusCode : undefined,
+        isCircuitBreakerOpen: error && error.code === 'EOPENBREAKER'
+      });
       
-      // Handle null/undefined errors
+      // Handle different error types
       if (!error) {
-        this.logger.error('Circuit breaker returned null error');
+        // Null or undefined error
+        this.logger.error('Circuit breaker returned null/undefined error');
         throw new ZeroBounceError('ZeroBounce service error occurred', 500);
       }
       
-      throw error;
+      // Circuit breaker specific errors
+      if (error.code === 'EOPENBREAKER' || error.name === 'CircuitBreakerOpen') {
+        throw new ZeroBounceError('ZeroBounce service is temporarily unavailable (circuit open)', 503);
+      }
+      
+      if (error.code === 'ETIMEDOUT' || error.name === 'TimeoutError') {
+        throw new ZeroBounceError('ZeroBounce request timed out', 504);
+      }
+      
+      // If it's already a ZeroBounceError, re-throw it
+      if (error instanceof ZeroBounceError) {
+        throw error;
+      }
+      
+      // Wrap any other errors
+      throw new ZeroBounceError(
+        `ZeroBounce validation failed: ${error.message || 'Unknown error'}`,
+        error.statusCode || 500
+      );
     }
   }
   
@@ -179,7 +229,7 @@ class ZeroBounceService {
           this.logger.debug('ZeroBounce API response received', {
             status: response.status,
             email,
-            headers: response.headers
+            dataReceived: !!response.data
           });
           
           // Handle different status codes
@@ -225,6 +275,13 @@ class ZeroBounceService {
             throw new ZeroBounceError('Invalid response from ZeroBounce API', 502);
           }
           
+          // Log successful response
+          this.logger.info('ZeroBounce validation successful', {
+            email,
+            status: response.data.status,
+            sub_status: response.data.sub_status
+          });
+          
           // Return the formatted validation result
           return this.formatValidationResponse(response.data, email);
           
@@ -242,17 +299,30 @@ class ZeroBounceService {
               errorMessage: error.message
             });
             
-            // Re-throw with proper error type
-            throw error;
+            // Create proper error based on status
+            if (status === 401) {
+              throw new ZeroBounceError('Invalid API key', 401);
+            } else if (status === 429) {
+              throw new ZeroBounceError('Rate limit exceeded', 429);
+            } else if (status >= 500) {
+              throw new ZeroBounceError(`ZeroBounce server error: ${error.message}`, status);
+            } else {
+              throw new ZeroBounceError(`ZeroBounce API error: ${error.message}`, status);
+            }
           } else if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
-            throw new TimeoutError('ZeroBounce request timed out', timeout);
+            throw new TimeoutError('ZeroBounce request timed out', attemptTimeout);
           } else if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
             throw new ExternalServiceError('Cannot connect to ZeroBounce API', 'zerobounce');
-          } else if (error instanceof ZeroBounceError) {
+          } else if (error instanceof ZeroBounceError || error instanceof TimeoutError) {
             // Re-throw our custom errors
             throw error;
           } else {
             // Something else happened
+            this.logger.error('Unexpected error during ZeroBounce request', {
+              error: error.message,
+              code: error.code,
+              type: error.constructor.name
+            });
             throw new ExternalServiceError(
               `ZeroBounce request failed: ${error.message}`,
               'zerobounce'
@@ -270,7 +340,11 @@ class ZeroBounceService {
         }
       });
     } catch (error) {
-      this.logger.error('ZeroBounce validation failed', error, { email });
+      this.logger.error('ZeroBounce validation failed after retries', { 
+        email,
+        error: error.message,
+        attempts: this.maxRetries
+      });
       throw error;
     }
   }
@@ -421,7 +495,9 @@ class ZeroBounceService {
         successes: this.circuitBreaker.stats.successes,
         failures: this.circuitBreaker.stats.failures,
         rejects: this.circuitBreaker.stats.rejects,
-        timeouts: this.circuitBreaker.stats.timeouts
+        timeouts: this.circuitBreaker.stats.timeouts,
+        fallbacks: this.circuitBreaker.stats.fallbacks,
+        cacheHits: this.circuitBreaker.stats.cacheHits
       }
     };
   }
@@ -433,7 +509,7 @@ class ZeroBounceService {
       
       return {
         status: 'healthy',
-        circuitBreaker: this.circuitBreaker.status.name,
+        circuitBreaker: this.getCircuitBreakerState(),
         credits: credits.credits,
         cacheSize: this.responseCache.size,
         enabled: config.services.zeroBounce.enabled
@@ -441,7 +517,7 @@ class ZeroBounceService {
     } catch (error) {
       return {
         status: 'unhealthy',
-        circuitBreaker: this.circuitBreaker.status.name,
+        circuitBreaker: this.getCircuitBreakerState(),
         error: error.message,
         errorCode: error.statusCode,
         enabled: config.services.zeroBounce.enabled
