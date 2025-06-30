@@ -189,6 +189,14 @@ class ZeroBounceService {
   
   // Actual API request execution (wrapped by circuit breaker)
   async executeRequest(email, ipAddress, timeout) {
+    this.logger.info('executeRequest called', {
+      email,
+      ipAddress,
+      timeout,
+      apiKeyExists: !!this.apiKey,
+      apiKeyLength: this.apiKey?.length || 0
+    });
+
     try {
       // Call ZeroBounce API with retry logic
       return await ErrorRecovery.withRetry(async (attempt) => {
@@ -346,9 +354,17 @@ class ZeroBounceService {
     } catch (error) {
       this.logger.error('ZeroBounce validation failed after retries', { 
         email,
-        error: error.message,
+        error: error?.message || 'Unknown error',
+        errorType: error?.constructor?.name || typeof error,
+        errorCode: error?.code,
         attempts: this.maxRetries
       });
+      
+      // If error is null, throw a proper error
+      if (!error) {
+        throw new ZeroBounceError('Null error received from API call', 500);
+      }
+      
       throw error;
     }
   }
@@ -504,6 +520,51 @@ class ZeroBounceService {
         cacheHits: this.circuitBreaker.stats.cacheHits
       }
     };
+  }
+  
+  // Simple test method to check API connectivity
+  async testApiConnection() {
+    try {
+      this.logger.info('Testing ZeroBounce API connection', {
+        apiKeyLength: this.apiKey?.length || 0,
+        baseUrl: this.baseUrl
+      });
+      
+      const url = `${this.baseUrl}/getcredits?api_key=${this.apiKey}`;
+      
+      const response = await axios.get(url, {
+        timeout: 5000,
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Unmessy-API/2.0'
+        }
+      });
+      
+      this.logger.info('API connection test result', {
+        status: response.status,
+        credits: response.data?.Credits,
+        data: response.data
+      });
+      
+      return {
+        success: true,
+        credits: response.data?.Credits,
+        response: response.data
+      };
+    } catch (error) {
+      this.logger.error('API connection test failed', {
+        error: error?.message || 'Unknown error',
+        status: error?.response?.status,
+        data: error?.response?.data
+      });
+      
+      return {
+        success: false,
+        error: error?.message || 'Unknown error',
+        status: error?.response?.status,
+        details: error?.response?.data
+      };
+    }
   }
   
   // Health check
