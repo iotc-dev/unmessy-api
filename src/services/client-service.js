@@ -280,23 +280,14 @@ class ClientService {
   // Increment usage counter (atomic operation)
   async incrementUsage(clientId, validationType, count = 1) {
     try {
-      // Update the remaining count directly
-      const remainingField = `remaining_${validationType}`;
-      const totalField = `total_${validationType}_count`;
+      // Use the database function via RPC
+      const result = await db.rpc('decrement_validation_count', {
+        p_client_id: clientId,
+        p_validation_type: validationType
+      });
       
-      const query = `
-        UPDATE clients 
-        SET 
-          ${remainingField} = GREATEST(0, ${remainingField} - $2),
-          ${totalField} = ${totalField} + $2,
-          updated_at = NOW()
-        WHERE client_id = $1
-        RETURNING ${remainingField} as remaining
-      `;
-      
-      const result = await db.query(query, [clientId, count]);
-      
-      const remaining = result.rows?.[0]?.remaining ?? -1;
+      // The function returns the remaining count or -1 on error
+      const remaining = result ?? -1;
       
       if (remaining === -1) {
         this.logger.warn('Failed to decrement rate limit', {
@@ -327,10 +318,14 @@ class ClientService {
   // Record validation metric
   async recordValidationMetric(clientId, validationType, success, responseTime, errorType = null) {
     try {
-      await db.query(
-        'SELECT record_validation_metric($1, $2, $3, $4, $5)',
-        [clientId, validationType, success, responseTime, errorType]
-      );
+      // Use RPC to call the database function
+      await db.rpc('record_validation_metric', {
+        p_client_id: clientId,
+        p_validation_type: validationType,
+        p_success: success,
+        p_response_time_ms: responseTime,
+        p_error_type: errorType
+      });
       
       this.logger.debug('Validation metric recorded', {
         clientId,
@@ -448,8 +443,8 @@ class ClientService {
   // Reset daily limits for all clients
   async resetDailyLimits() {
     try {
-      // Call the stored procedure to reset limits
-      await db.query('SELECT reset_remaining_counts()');
+      // Call the stored procedure to reset limits using RPC
+      await db.rpc('reset_remaining_counts', {});
       
       // Clear all caches
       this.clientCache.clear();

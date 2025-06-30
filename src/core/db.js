@@ -193,24 +193,64 @@ export const db = {
    */
   query: async (textOrFunction, params = []) => {
     return db.executeWithRetry(async (supabase) => {
-      // Check if this is a function call (no spaces, SELECT, UPDATE, etc.)
-      const isFunction = !textOrFunction.includes(' ') && 
-                        !textOrFunction.toUpperCase().includes('SELECT') &&
-                        !textOrFunction.toUpperCase().includes('UPDATE') &&
-                        !textOrFunction.toUpperCase().includes('INSERT') &&
-                        !textOrFunction.toUpperCase().includes('DELETE');
+      // List of known database functions
+      const knownFunctions = [
+        'decrement_validation_count',
+        'decrement_email_count',
+        'decrement_name_count',
+        'decrement_phone_count',
+        'decrement_address_count',
+        'record_validation_metric',
+        'reset_remaining_counts'
+      ];
+      
+      // Improved function detection
+      const isFunction = knownFunctions.includes(textOrFunction) ||
+                        (!textOrFunction.includes(' ') && 
+                         !textOrFunction.toUpperCase().includes('SELECT') &&
+                         !textOrFunction.toUpperCase().includes('UPDATE') &&
+                         !textOrFunction.toUpperCase().includes('INSERT') &&
+                         !textOrFunction.toUpperCase().includes('DELETE') &&
+                         !textOrFunction.includes('=') &&
+                         !textOrFunction.includes('(') &&
+                         !textOrFunction.includes(')') &&
+                         !textOrFunction.includes(';'));
       
       // Handle RPC function calls
       if (isFunction) {
-        logger.debug('Executing RPC function', { function: textOrFunction, params });
+        logger.debug('Executing RPC function via query method', { function: textOrFunction, params });
         
         try {
-          const { data, error } = await supabase.rpc(textOrFunction, params);
+          // If params is an array, try to convert to object based on known function signatures
+          let rpcParams = params;
+          
+          if (Array.isArray(params) && params.length > 0) {
+            // Convert array parameters to object format for known functions
+            if (textOrFunction === 'decrement_validation_count' && params.length >= 2) {
+              rpcParams = {
+                p_client_id: params[0],
+                p_validation_type: params[1]
+              };
+            } else if (textOrFunction === 'record_validation_metric' && params.length >= 5) {
+              rpcParams = {
+                p_client_id: params[0],
+                p_validation_type: params[1],
+                p_success: params[2],
+                p_response_time_ms: params[3],
+                p_error_type: params[4] || null
+              };
+            } else if (params.length === 1 && typeof params[0] === 'object') {
+              // If single object parameter, use it directly
+              rpcParams = params[0];
+            }
+          }
+          
+          const { data, error } = await supabase.rpc(textOrFunction, rpcParams);
           
           if (error) {
             logger.error('RPC function error', error, { 
               function: textOrFunction, 
-              params,
+              params: rpcParams,
               code: error.code,
               message: error.message 
             });

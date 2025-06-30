@@ -118,8 +118,15 @@ class ZeroBounceService {
       
       return result;
     } catch (error) {
-      if (error.name === 'CircuitBreakerOpen') {
+      // Check if error exists before accessing properties
+      if (error && error.name === 'CircuitBreakerOpen') {
         throw new ZeroBounceError('ZeroBounce service is temporarily unavailable', 503);
+      }
+      
+      // Handle null/undefined errors
+      if (!error) {
+        this.logger.error('Circuit breaker returned null error');
+        throw new ZeroBounceError('ZeroBounce service error occurred', 500);
       }
       
       throw error;
@@ -129,19 +136,16 @@ class ZeroBounceService {
   // Actual API request execution (wrapped by circuit breaker)
   async executeRequest(email, ipAddress, timeout) {
     try {
-      // Import axios at the top of the method since it's not imported in your file
-      const axios = (await import('axios')).default;
-      
       // Call ZeroBounce API with retry logic
       return await ErrorRecovery.withRetry(async (attempt) => {
         this.logger.debug('Calling ZeroBounce API', {
           email,
           attempt,
-          timeout: attempt === 1 ? timeout : this.retryTimeout
+          timeout: attempt === 1 ? timeout : timeout * 1.5
         });
         
         // Use longer timeout for retries
-        const attemptTimeout = attempt === 1 ? timeout : this.retryTimeout;
+        const attemptTimeout = attempt === 1 ? timeout : timeout * 1.5;
         
         // Build the URL with query parameters
         const params = new URLSearchParams({
@@ -271,11 +275,43 @@ class ZeroBounceService {
     }
   }
   
-  // Check API credits using axios
+  // Format the validation response from ZeroBounce
+  formatValidationResponse(data, email) {
+    // Handle case where data might be null or undefined
+    if (!data) {
+      return {
+        email: email,
+        status: 'unknown',
+        sub_status: 'api_error',
+        error: 'No response data from ZeroBounce'
+      };
+    }
+
+    return {
+      email: email,
+      status: data.status || 'unknown',
+      sub_status: data.sub_status || '',
+      free_email: data.free_email || false,
+      did_you_mean: data.did_you_mean || null,
+      account: data.account || null,
+      domain: data.domain || null,
+      domain_age_days: data.domain_age_days || null,
+      smtp_provider: data.smtp_provider || null,
+      mx_record: data.mx_record || null,
+      mx_found: data.mx_found || 'false',
+      firstname: data.firstname || null,
+      lastname: data.lastname || null,
+      gender: data.gender || null,
+      country: data.country || null,
+      region: data.region || null,
+      city: data.city || null,
+      zipcode: data.zipcode || null,
+      processed_at: data.processed_at || new Date().toISOString()
+    };
+  }
+  
+  // Check API credits
   async checkCredits() {
-    // Import axios
-    const axios = (await import('axios')).default;
-    
     // Check cache first
     if (this.creditsCache.credits !== null && 
         this.creditsCache.timestamp &&
