@@ -751,25 +751,33 @@ class QueueService {
       value: String(umCheckId)
     });
     
-    // Add original contact fields (firstname, lastname, email)
-    if (contactData?.properties?.email || item.contact_email) {
+    // CRITICAL: Original contact fields (firstname, lastname, email) must NEVER be changed
+    // These fields should always contain the original values from HubSpot
+    
+    // Original email - NEVER change this field
+    const originalEmail = contactData?.properties?.email || item.contact_email || '';
+    if (originalEmail) {
       fields.push({
         name: 'email',
-        value: contactData?.properties?.email || item.contact_email || ''
+        value: originalEmail  // Always use original value
       });
     }
     
-    if (item.contact_firstname || contactData?.properties?.firstname) {
+    // Original firstname - NEVER change this field
+    const originalFirstName = contactData?.properties?.firstname || item.contact_firstname || '';
+    if (originalFirstName) {
       fields.push({
         name: 'firstname',
-        value: item.contact_firstname || contactData?.properties?.firstname || ''
+        value: originalFirstName  // Always use original value
       });
     }
     
-    if (item.contact_lastname || contactData?.properties?.lastname) {
+    // Original lastname - NEVER change this field
+    const originalLastName = contactData?.properties?.lastname || item.contact_lastname || '';
+    if (originalLastName) {
       fields.push({
         name: 'lastname',
-        value: item.contact_lastname || contactData?.properties?.lastname || ''
+        value: originalLastName  // Always use original value
       });
     }
     
