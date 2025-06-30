@@ -81,14 +81,14 @@ class ZeroBounceService {
     
     this.circuitBreaker.on('fallback', (data, err) => {
       this.logger.warn('ZeroBounce circuit breaker fallback executed', {
-        error: err ? err.message : 'unknown error',
-        errorType: err ? err.constructor.name : 'unknown'
+        error: err && err.message ? err.message : 'unknown error',
+        errorType: err ? String(err.constructor?.name || typeof err) : 'unknown'
       });
     });
     
     this.circuitBreaker.on('timeout', (err) => {
       this.logger.warn('ZeroBounce request timed out', {
-        error: err ? err.message : 'timeout'
+        error: err && err.message ? err.message : 'timeout'
       });
     });
     
@@ -98,9 +98,9 @@ class ZeroBounceService {
     
     this.circuitBreaker.on('failure', (err) => {
       this.logger.error('ZeroBounce circuit breaker failure', {
-        error: err ? err.message : 'unknown error',
-        errorType: err ? err.constructor.name : 'unknown',
-        stack: err ? err.stack : undefined
+        error: err && err.message ? err.message : 'unknown error',
+        errorType: err ? String(err.constructor?.name || typeof err) : 'unknown',
+        stack: err && err.stack ? err.stack : undefined
       });
     });
   }
@@ -144,15 +144,30 @@ class ZeroBounceService {
       
       return result;
     } catch (error) {
-      // Log detailed error information
-      this.logger.error('ZeroBounce validation error', {
+      // Log detailed error information with safe property access
+      const errorInfo = {
         email,
-        errorType: error ? error.constructor.name : 'unknown',
-        errorMessage: error ? error.message : 'unknown error',
-        errorCode: error ? error.code : undefined,
-        errorStatus: error ? error.statusCode : undefined,
-        isCircuitBreakerOpen: error && error.code === 'EOPENBREAKER'
-      });
+        errorType: 'unknown',
+        errorMessage: 'unknown error',
+        errorCode: undefined,
+        errorStatus: undefined,
+        isCircuitBreakerOpen: false
+      };
+      
+      if (error) {
+        try {
+          errorInfo.errorType = error.constructor?.name || typeof error;
+          errorInfo.errorMessage = error.message || String(error);
+          errorInfo.errorCode = error.code;
+          errorInfo.errorStatus = error.statusCode;
+          errorInfo.isCircuitBreakerOpen = error.code === 'EOPENBREAKER';
+        } catch (e) {
+          // If accessing error properties fails, use what we have
+          this.logger.warn('Failed to extract error details', { originalError: String(error) });
+        }
+      }
+      
+      this.logger.error('ZeroBounce validation error', errorInfo);
       
       // Handle different error types
       if (!error) {
@@ -176,9 +191,10 @@ class ZeroBounceService {
       }
       
       // Wrap any other errors
+      const errorMessage = error && error.message ? error.message : 'Unknown error';
       throw new ZeroBounceError(
-        `ZeroBounce validation failed: ${error.message || 'Unknown error'}`,
-        error.statusCode || 500
+        `ZeroBounce validation failed: ${errorMessage}`,
+        error && error.statusCode ? error.statusCode : 500
       );
     }
   }
