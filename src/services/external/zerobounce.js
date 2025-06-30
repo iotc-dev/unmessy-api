@@ -197,6 +197,60 @@ class ZeroBounceService {
       apiKeyLength: this.apiKey?.length || 0
     });
 
+    // TEMPORARY: Test without ErrorRecovery wrapper
+    try {
+      this.logger.info('Making direct API call (bypassing ErrorRecovery)', { email });
+      
+      const params = new URLSearchParams({
+        api_key: this.apiKey,
+        email: email
+      });
+      
+      if (ipAddress && ipAddress.trim() !== '') {
+        params.append('ip_address', ipAddress);
+      }
+      
+      const url = `${this.baseUrl}/validate?${params.toString()}`;
+      
+      this.logger.debug('ZeroBounce URL:', {
+        url: url.replace(this.apiKey, 'REDACTED')
+      });
+      
+      const response = await axios.get(url, {
+        timeout: timeout,
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Unmessy-API/2.0'
+        }
+      });
+      
+      this.logger.info('Direct API response received', {
+        status: response.status,
+        data: response.data
+      });
+      
+      return this.formatValidationResponse(response.data, email);
+      
+    } catch (error) {
+      this.logger.error('Direct API call failed', {
+        email,
+        error: error?.message || 'Unknown error',
+        status: error?.response?.status,
+        data: error?.response?.data,
+        code: error?.code
+      });
+      
+      if (error?.response?.status === 401) {
+        throw new ZeroBounceError('Invalid API key', 401);
+      }
+      
+      throw new ZeroBounceError(
+        `API call failed: ${error?.message || 'Unknown error'}`,
+        error?.response?.status || 500
+      );
+    }
+    
+    /* COMMENTED OUT FOR DEBUGGING
     try {
       // Call ZeroBounce API with retry logic
       return await ErrorRecovery.withRetry(async (attempt) => {
@@ -367,6 +421,7 @@ class ZeroBounceService {
       
       throw error;
     }
+    */
   }
   
   // Format the validation response from ZeroBounce
