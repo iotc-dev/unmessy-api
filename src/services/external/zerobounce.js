@@ -131,8 +131,9 @@ class ZeroBounceService {
     }
     
     try {
-      // Execute through circuit breaker
-      const result = await this.circuitBreaker.fire(email, ipAddress, timeout);
+      // TEMPORARY: Bypass circuit breaker to isolate the issue
+      this.logger.warn('BYPASSING CIRCUIT BREAKER FOR DEBUGGING');
+      const result = await this.executeRequest(email, ipAddress, timeout);
       
       // Check if we got a valid result
       if (!result) {
@@ -144,38 +145,25 @@ class ZeroBounceService {
       
       return result;
     } catch (error) {
-      // Log detailed error information with safe property access
+      // Handle null/undefined error immediately
+      if (error == null) {
+        this.logger.error('Received null/undefined error object during ZeroBounce validation', { email });
+        throw new ZeroBounceError('Unexpected null error from circuit breaker', 500);
+      }
+      
+      // Log detailed error information with full null-safe access
       const errorInfo = {
         email,
-        errorType: 'unknown',
-        errorMessage: 'unknown error',
-        errorCode: undefined,
-        errorStatus: undefined,
-        isCircuitBreakerOpen: false
+        errorType: error?.constructor?.name || (error === null ? 'NullError' : typeof error),
+        errorMessage: error?.message || (error === null ? 'null error' : String(error)),
+        errorCode: error?.code,
+        errorStatus: error?.statusCode,
+        isCircuitBreakerOpen: error?.code === 'EOPENBREAKER'
       };
-      
-      if (error) {
-        try {
-          errorInfo.errorType = error.constructor?.name || typeof error;
-          errorInfo.errorMessage = error.message || String(error);
-          errorInfo.errorCode = error.code;
-          errorInfo.errorStatus = error.statusCode;
-          errorInfo.isCircuitBreakerOpen = error.code === 'EOPENBREAKER';
-        } catch (e) {
-          // If accessing error properties fails, use what we have
-          this.logger.warn('Failed to extract error details', { originalError: String(error) });
-        }
-      }
       
       this.logger.error('ZeroBounce validation error', errorInfo);
       
       // Handle different error types
-      if (!error) {
-        // Null or undefined error
-        this.logger.error('Circuit breaker returned null/undefined error');
-        throw new ZeroBounceError('ZeroBounce service error occurred', 500);
-      }
-      
       // Circuit breaker specific errors
       if (error.code === 'EOPENBREAKER' || error.name === 'CircuitBreakerOpen') {
         throw new ZeroBounceError('ZeroBounce service is temporarily unavailable (circuit open)', 503);
@@ -191,10 +179,10 @@ class ZeroBounceService {
       }
       
       // Wrap any other errors
-      const errorMessage = error && error.message ? error.message : 'Unknown error';
+      const errorMessage = error?.message || 'Unknown error';
       throw new ZeroBounceError(
         `ZeroBounce validation failed: ${errorMessage}`,
-        error && error.statusCode ? error.statusCode : 500
+        error?.statusCode || 500
       );
     }
   }
