@@ -618,28 +618,82 @@ class QueueService {
       // Build form fields with proper structure
       const formData = this.buildFormData(item, contactData, validationResults, item.client_id);
       
-      // Debug log the form data being submitted - show actual structure
+      // Debug log the form data being submitted
       this.logger.info('Submitting form data to HubSpot', {
         formGuid: hubspotConfig.formGuid,
         contactId: item.object_id,
         fieldCount: formData.fields.length,
         fieldNames: formData.fields.map(f => f.name),
-        // Log a sample of the fields structure for debugging
         sampleFields: formData.fields.slice(0, 3).map(f => ({ name: f.name, value: f.value }))
       });
       
-      // Submit to HubSpot with contact association
-      const result = await hubspotService.submitForm(
-        formData, // Pass the whole formData object with { fields: [...] } structure
-        hubspotConfig.portalId,
-        hubspotConfig.formGuid,
-        {
-          objectId: item.object_id, // Associate with the contact
-          skipValidation: true, // Handle field mismatches gracefully
-          pageUri: 'https://unmessy-api.vercel.app/queue-processor',
-          pageName: 'Unmessy Queue Processor'
+      // Submit to HubSpot WITHOUT objectId to avoid 400 error
+      let result;
+      try {
+        // First attempt WITHOUT objectId - this is likely the fix
+        result = await hubspotService.submitForm(
+          formData,
+          hubspotConfig.portalId,
+          hubspotConfig.formGuid,
+          {
+            // REMOVED objectId to fix 400 error
+            // objectId: item.object_id, // REMOVED - this was causing the issue
+            skipValidation: true,
+            pageUri: 'https://unmessy-api.vercel.app/queue-processor',
+            pageName: 'Unmessy Queue Processor'
+          }
+        );
+        
+        this.logger.info('Form submitted successfully without objectId', {
+          formGuid: hubspotConfig.formGuid,
+          success: true
+        });
+        
+      } catch (firstError) {
+        // If it still fails, try with minimal fields
+        this.logger.warn('First submission attempt failed, trying with minimal fields', {
+          error: firstError.message,
+          formGuid: hubspotConfig.formGuid
+        });
+        
+        // Try with only essential fields
+        const minimalFormData = {
+          fields: [
+            { name: 'email', value: contactData?.properties?.email || item.contact_email || '' },
+            { name: 'firstname', value: contactData?.properties?.firstname || item.contact_firstname || '' },
+            { name: 'lastname', value: contactData?.properties?.lastname || item.contact_lastname || '' }
+          ].filter(f => f.value) // Remove empty fields
+        };
+        
+        try {
+          result = await hubspotService.submitForm(
+            minimalFormData,
+            hubspotConfig.portalId,
+            hubspotConfig.formGuid,
+            {
+              skipValidation: true,
+              pageUri: 'https://unmessy-api.vercel.app/queue-processor',
+              pageName: 'Unmessy Queue Processor'
+            }
+          );
+          
+          this.logger.info('Minimal form submission succeeded', {
+            formGuid: hubspotConfig.formGuid,
+            fieldCount: minimalFormData.fields.length
+          });
+          
+        } catch (secondError) {
+          // Log detailed error for debugging
+          this.logger.error('All form submission attempts failed', {
+            firstError: firstError.message,
+            secondError: secondError.message,
+            formGuid: hubspotConfig.formGuid,
+            portalId: hubspotConfig.portalId,
+            fieldNames: formData.fields.map(f => f.name)
+          });
+          throw secondError;
         }
-      );
+      }
       
       // Update rate limits
       await this.updateRateLimits(item.client_id, validationResults);
@@ -668,45 +722,59 @@ class QueueService {
   buildFormData(item, contactData, validationResults, clientId) {
     const fields = [];
     
-    // Always include UM check ID and epoch
-    const epochMs = Date.now();
-    const umCheckId = this.generateUmCheckId(clientId, epochMs);
-    
-    // Fix epoch to be in seconds, not milliseconds
-    fields.push({
-      name: 'date_last_um_check_epoch',
-      value: Math.floor(epochMs / 1000).toString()
+    // DEBUG: Log incoming data
+    this.logger.warn('DEBUG: Building form data', {
+      itemId: item.id,
+      hasValidationResults: !!validationResults,
+      hasContactData: !!contactData,
+      validationResultKeys: Object.keys(validationResults || {})
     });
     
+    // Always use current time for epoch, never trust incoming data
+    const currentEpochSeconds = Math.floor(Date.now() / 1000);
+    
+    // Add epoch with validation
+    fields.push({
+      name: 'date_last_um_check_epoch',
+      value: currentEpochSeconds.toString()
+    });
+    
+    this.logger.info('Using epoch', {
+      epochSeconds: currentEpochSeconds,
+      date: new Date(currentEpochSeconds * 1000).toISOString()
+    });
+    
+    // Generate UM check ID
+    const umCheckId = this.generateUmCheckId(clientId, Date.now());
     fields.push({
       name: 'um_check_id',
       value: String(umCheckId)
     });
     
     // Add original contact fields (firstname, lastname, email)
-    if (contactData?.properties?.email) {
+    if (contactData?.properties?.email || item.contact_email) {
       fields.push({
         name: 'email',
-        value: contactData.properties.email
+        value: contactData?.properties?.email || item.contact_email || ''
       });
     }
     
     if (item.contact_firstname || contactData?.properties?.firstname) {
       fields.push({
         name: 'firstname',
-        value: item.contact_firstname || contactData.properties.firstname || ''
+        value: item.contact_firstname || contactData?.properties?.firstname || ''
       });
     }
     
     if (item.contact_lastname || contactData?.properties?.lastname) {
       fields.push({
         name: 'lastname',
-        value: item.contact_lastname || contactData.properties.lastname || ''
+        value: item.contact_lastname || contactData?.properties?.lastname || ''
       });
     }
     
     // Add email validation results (um_ fields)
-    if (validationResults.email && !validationResults.email.error) {
+    if (validationResults?.email && !validationResults.email.error) {
       const emailResult = validationResults.email;
       fields.push({
         name: 'um_email',
@@ -723,15 +791,15 @@ class QueueService {
     }
     
     // Add name validation results (um_ fields)
-    if (validationResults.name && !validationResults.name.error) {
+    if (validationResults?.name && !validationResults.name.error) {
       const nameResult = validationResults.name;
       fields.push({
         name: 'um_first_name',
-        value: nameResult.firstName || ''
+        value: nameResult.firstName || nameResult.um_first_name || ''
       });
       fields.push({
         name: 'um_last_name',
-        value: nameResult.lastName || ''
+        value: nameResult.lastName || nameResult.um_last_name || ''
       });
       fields.push({
         name: 'um_name_status',
@@ -763,16 +831,22 @@ class QueueService {
         });
       }
       
-      if (nameResult.firstName || nameResult.lastName) {
+      // Build full name
+      const fullName = [
+        nameResult.firstName || nameResult.um_first_name || '',
+        nameResult.lastName || nameResult.um_last_name || ''
+      ].filter(n => n).join(' ');
+      
+      if (fullName) {
         fields.push({
           name: 'um_name',
-          value: `${nameResult.firstName || ''} ${nameResult.lastName || ''}`.trim()
+          value: fullName
         });
       }
     }
     
     // Add phone validation results (um_ fields)
-    if (validationResults.phone && !validationResults.phone.error) {
+    if (validationResults?.phone && !validationResults.phone.error) {
       const phoneResult = validationResults.phone;
       
       // Determine whether to use um_phone1 or um_phone2
@@ -832,94 +906,121 @@ class QueueService {
           value: phoneResult.country || ''
         });
       }
-      
-      this.logger.info('Phone validation mapped to field', {
-        usePhone2,
-        existingPhone1: existingPhone1 || 'empty',
-        newPhone: phoneResult.formatted
-      });
     }
     
     // Add address validation results
-    if (validationResults.address && !validationResults.address.error) {
+    if (validationResults?.address && !validationResults.address.error) {
       const addressResult = validationResults.address;
       
       const addressFields = [
-        { name: 'um_house_number', value: addressResult.houseNumber || '' },
-        { name: 'um_street_name', value: addressResult.streetName || '' },
-        { name: 'um_street_type', value: addressResult.streetType || '' },
-        { name: 'um_street_direction', value: addressResult.streetDirection || '' },
-        { name: 'um_unit_type', value: addressResult.unitType || '' },
-        { name: 'um_unit_number', value: addressResult.unitNumber || '' },
-        { name: 'um_city', value: addressResult.city || '' },
-        { name: 'um_state_province', value: addressResult.state || '' },
-        { name: 'um_postal_code', value: addressResult.postalCode || '' },
-        { name: 'um_country', value: addressResult.country || '' },
-        { name: 'um_country_code', value: addressResult.countryCode || '' },
-        { name: 'um_address_status', value: addressResult.isValid ? 'Valid' : 'Invalid' },
-        { name: 'um_formatted_address', value: addressResult.formatted || '' }
+        { name: 'um_house_number', value: addressResult.um_house_number || addressResult.houseNumber || '' },
+        { name: 'um_street_name', value: addressResult.um_street_name || addressResult.streetName || '' },
+        { name: 'um_street_type', value: addressResult.um_street_type || addressResult.streetType || '' },
+        { name: 'um_street_direction', value: addressResult.um_street_direction || addressResult.streetDirection || '' },
+        { name: 'um_unit_type', value: addressResult.um_unit_type || addressResult.unitType || '' },
+        { name: 'um_unit_number', value: addressResult.um_unit_number || addressResult.unitNumber || '' },
+        { name: 'um_city', value: addressResult.um_city || addressResult.city || '' },
+        { name: 'um_state_province', value: addressResult.um_state_province || addressResult.state || '' },
+        { name: 'um_postal_code', value: addressResult.um_postal_code || addressResult.postalCode || '' },
+        { name: 'um_country', value: addressResult.um_country || addressResult.country || '' },
+        { name: 'um_country_code', value: addressResult.um_country_code || addressResult.countryCode || '' },
+        { name: 'um_address_status', value: addressResult.valid ? 'Valid' : 'Invalid' }
       ];
       
+      // Add address line fields if available
+      if (addressResult.um_address_line_1) {
+        fields.push({
+          name: 'um_address_line_1',
+          value: addressResult.um_address_line_1
+        });
+      }
+      
+      if (addressResult.um_address_line_2) {
+        fields.push({
+          name: 'um_address_line_2',
+          value: addressResult.um_address_line_2
+        });
+      }
+      
+      // Add all address fields that have values
       addressFields.forEach(field => {
         if (field.value) {
           fields.push(field);
         }
       });
-      
-      if (addressResult.latitude && addressResult.longitude) {
-        fields.push({
-          name: 'um_latitude',
-          value: String(addressResult.latitude)
-        });
-        fields.push({
-          name: 'um_longitude',
-          value: String(addressResult.longitude)
-        });
-      }
     }
+    
+    // Log final field count and names
+    this.logger.info('Form data built', {
+      fieldCount: fields.length,
+      fieldNames: fields.map(f => f.name),
+      epochValue: currentEpochSeconds
+    });
     
     // Return in the format expected by HubSpot service
     return {
-      fields: fields.filter(field => field.value !== null && field.value !== undefined && field.value !== '')
+      fields: fields.filter(field => 
+        field.value !== null && 
+        field.value !== undefined && 
+        field.value !== ''
+      )
     };
   }
   
-  // Generate UM check ID
+  // Generate UM check ID with validation
   generateUmCheckId(clientId, epochMs) {
+    // Always use current time if epochMs is invalid
+    if (!epochMs || epochMs > Date.now() * 2 || epochMs < 0) {
+      this.logger.error('Invalid epochMs in generateUmCheckId', {
+        epochMs,
+        currentTime: Date.now()
+      });
+      epochMs = Date.now();
+    }
+    
     const lastSixDigits = String(epochMs).slice(-6);
     const clientIdStr = clientId || config.clients.defaultClientId || '0001';
     const firstThreeDigits = String(epochMs).slice(0, 3);
     const sum = [...firstThreeDigits].reduce((acc, digit) => acc + parseInt(digit), 0);
     const checkDigit = String(sum * parseInt(clientIdStr)).padStart(3, '0').slice(-3);
-    return Number(`${lastSixDigits}${clientIdStr}${checkDigit}${config.unmessy.version.replace(/\./g, '')}`);
+    const checkId = Number(`${lastSixDigits}${clientIdStr}${checkDigit}${config.unmessy.version.replace(/\./g, '')}`);
+    
+    this.logger.debug('Generated UM check ID', {
+      epochMs,
+      lastSixDigits,
+      clientIdStr,
+      checkId
+    });
+    
+    return checkId;
   }
   
   // Update rate limits after successful validation
   async updateRateLimits(clientId, validationResults) {
     const promises = [];
     
-    if (validationResults.email && !validationResults.email.error) {
+    if (validationResults?.email && !validationResults.email.error) {
       promises.push(
         clientService.incrementUsage(clientId, 'email')
           .catch(err => this.logger.error('Failed to update email rate limit', err))
       );
     }
     
-    if (validationResults.name && !validationResults.name.error) {
+    if (validationResults?.name && !validationResults.name.error) {
       promises.push(
         clientService.incrementUsage(clientId, 'name')
           .catch(err => this.logger.error('Failed to update name rate limit', err))
       );
     }
     
-    if (validationResults.phone && !validationResults.phone.error) {
+    if (validationResults?.phone && !validationResults.phone.error) {
       promises.push(
         clientService.incrementUsage(clientId, 'phone')
           .catch(err => this.logger.error('Failed to update phone rate limit', err))
       );
     }
     
-    if (validationResults.address && !validationResults.address.error) {
+    if (validationResults?.address && !validationResults.address.error) {
       promises.push(
         clientService.incrementUsage(clientId, 'address')
           .catch(err => this.logger.error('Failed to update address rate limit', err))
