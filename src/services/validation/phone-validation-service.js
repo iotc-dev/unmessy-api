@@ -908,14 +908,14 @@ class PhoneValidationService {
     return countryNames[countryCode] || countryCode;
   }
   
-  // Build validation result
+  // Build validation result - UPDATED FOR CORRECT PHONE PROPERTIES
   buildValidationResult(originalPhone, validationData, clientId) {
     const isValid = validationData.valid === true;
     const formatValid = validationData.formatValid !== false;
     
     // Determine if phone was changed (formatted differently)
     const formattedPhone = validationData.international || validationData.e164 || this.cleanPhoneNumber(originalPhone);
-    const wasChanged = originalPhone !== formattedPhone;
+    const wasCorrected = originalPhone !== formattedPhone;
     
     // Get the country name properly
     const countryCode = validationData.country || null;
@@ -928,6 +928,31 @@ class PhoneValidationService {
       factors: isValid ? ['basic_valid'] : ['invalid']
     };
     
+    // Determine line type for isMobile - CRITICAL FIX
+    let isMobile = false;
+    const phoneType = validationData.type;
+    
+    if (phoneType === 'MOBILE') {
+      isMobile = true;
+    } else if (phoneType === 'FIXED_LINE') {
+      isMobile = false;
+    } else if (phoneType === 'FIXED_LINE_OR_MOBILE') {
+      // Use external API result if available, otherwise default to mobile
+      if (validationData.isMobile !== undefined) {
+        isMobile = validationData.isMobile;
+      } else {
+        // Default to mobile for ambiguous types when external API is unavailable
+        isMobile = true;
+        this.logger.info('Defaulting FIXED_LINE_OR_MOBILE to mobile (external API unavailable)', {
+          phone: originalPhone.substring(0, 6) + '***',
+          country: countryCode
+        });
+      }
+    } else {
+      // For unknown types, check if external API provided info
+      isMobile = validationData.isMobile || false;
+    }
+    
     const result = {
       originalPhone,
       currentPhone: validationData.e164 || this.cleanPhoneNumber(originalPhone),
@@ -937,15 +962,19 @@ class PhoneValidationService {
       error: validationData.error || null,
       warning: validationData.warning || null,
       
-      // Phone type - FIXED: No defaulting for ambiguous types
-      type: validationData.type || 'UNKNOWN',
+      // Phone type information
+      type: phoneType || 'UNKNOWN',
+      lineType: phoneType || 'UNKNOWN',
       
       // Location info
       location: validationData.location || countryName || 'Unknown',
       carrier: validationData.carrier || '',
+      areaCode: validationData.areaCode || null,
+      area: validationData.area || null,
       
       // Phone formats
       e164: validationData.e164 || null,
+      formatted: validationData.international || validationData.e164 || originalPhone,
       internationalFormat: validationData.international || null,
       nationalFormat: validationData.national || null,
       uri: validationData.uri || null,
@@ -953,6 +982,11 @@ class PhoneValidationService {
       // Country details
       countryCode: countryCode,
       countryCallingCode: validationData.countryCode || null,
+      country: countryName,
+      
+      // Mobile detection - FIXED
+      isMobile: isMobile,
+      isFixedLine: phoneType === 'FIXED_LINE',
       
       // Confidence details
       confidence: confidence.level,
@@ -964,16 +998,10 @@ class PhoneValidationService {
       externalApiUsed: validationData.externalApiUsed || false,
       isFictional: validationData.isFictional || false,
       
-      // Unmessy fields - Default is_mobile for ambiguous types
-      um_phone: validationData.international || validationData.e164 || originalPhone,
-      um_phone_status: wasChanged ? 'Changed' : 'Unchanged',
-      um_phone_format: formatValid ? 'Valid' : 'Invalid',
-      um_phone_country_code: countryCode || '',
-      um_phone_country: countryName,
-      um_phone_is_mobile: validationData.isMobile === true || 
-                          (validationData.type === 'FIXED_LINE_OR_MOBILE' && validationData.numverifyAttempted),
+      // Status determination - CORRECTED LOGIC
+      wasCorrected: wasCorrected,
       
-      // Debug info
+      // For debugging/monitoring
       detectedCountry: validationData.country,
       parseError: validationData.parseError || null
     };
@@ -1022,25 +1050,25 @@ class PhoneValidationService {
           possible: true,
           formatValid: true,
           type: data.phone_type,
+          lineType: data.phone_type,
           location: this.getCountryName(data.country),
           carrier: data.carrier || '',
           e164: data.e164,
+          formatted: data.international_format,
           internationalFormat: data.international_format,
           nationalFormat: data.national_format,
           uri: `tel:${data.e164}`,
           countryCode: data.country,
           countryCallingCode: data.country_code,
+          country: this.getCountryName(data.country),
+          isMobile: data.is_mobile,
+          isFixedLine: data.phone_type === 'FIXED_LINE',
           confidence: data.confidence_level || 'high',
           confidenceScore: data.confidence_score || 90,
           confidenceFactors: ['cached_result', 'previously_validated'],
           validationMethod: data.validation_method || 'cached',
           externalApiUsed: data.external_api_used || false,
-          um_phone: data.international_format,
-          um_phone_status: data.original_phone !== data.international_format ? 'Changed' : 'Unchanged',
-          um_phone_format: 'Valid',
-          um_phone_country_code: data.country,
-          um_phone_country: this.getCountryName(data.country),
-          um_phone_is_mobile: data.is_mobile,
+          wasCorrected: data.original_phone !== data.international_format,
           isFromCache: true
         };
       }
@@ -1067,7 +1095,7 @@ class PhoneValidationService {
         country_code: validationResult.countryCallingCode,
         country: validationResult.countryCode,
         phone_type: validationResult.type,
-        is_mobile: validationResult.um_phone_is_mobile,
+        is_mobile: validationResult.isMobile,
         valid: validationResult.valid,
         confidence_score: validationResult.confidenceScore,
         confidence_level: validationResult.confidence,
@@ -1081,6 +1109,7 @@ class PhoneValidationService {
         phone: validationResult.e164,
         confidence: validationResult.confidence,
         method: validationResult.validationMethod,
+        isMobile: validationResult.isMobile,
         clientId 
       });
     } catch (error) {
@@ -1089,6 +1118,14 @@ class PhoneValidationService {
         this.logger.error('Failed to save phone validation', error, { phone });
       }
     }
+  }
+  
+  // NEW METHOD: Load normalization data (for compatibility with validation service)
+  async loadNormalizationData() {
+    // This method is called by the main validation service
+    // All our data is already loaded in the constructor
+    this.logger.info('Phone validation normalization data already loaded');
+    return true;
   }
   
   // Utility function to get all supported countries (for reference/UI)
@@ -1109,5 +1146,3 @@ const phoneValidationService = new PhoneValidationService();
 
 // Export the class and instance 
 export { phoneValidationService, PhoneValidationService };
-
-//aa

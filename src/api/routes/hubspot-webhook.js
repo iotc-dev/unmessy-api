@@ -111,7 +111,7 @@ async function findClientIdFromPortal(portalId) {
 }
 
 /**
- * Fetch contact data from HubSpot
+ * Fetch contact data from HubSpot with comprehensive properties
  * @param {string} contactId - HubSpot contact ID
  * @param {string} apiKey - HubSpot API key
  * @returns {Promise<Object|null>} Contact data or null if failed
@@ -123,7 +123,68 @@ async function fetchContactData(contactId, apiKey) {
   }
 
   try {
-    return await hubspotService.fetchContact(contactId, apiKey);
+    // Comprehensive list of properties to fetch
+    const properties = [
+      // Standard contact fields
+      'email', 'firstname', 'lastname',
+      
+      // ALL possible phone fields
+      'phone', 'mobilephone', 'hs_phone_number',
+      'phone_number', 'mobile_phone_number',
+      'work_phone', 'home_phone', 'cell_phone',
+      
+      // ALL possible address fields
+      'address', 'address2', 
+      'hs_street_address_1', 'hs_street_address_2',
+      'city', 'state', 'zip', 'postal_code',
+      'hs_city', 'hs_state_region', 'hs_postal_code',
+      'country', 'country_code', 'hs_country',
+      
+      // Unmessy processed fields
+      'um_email', 'um_first_name', 'um_last_name',
+      'um_email_status', 'um_bounce_status', 'um_name_status',
+      
+      // Unmessy phone fields
+      'um_phone1', 'um_phone1_status', 'um_phone1_format',
+      'um_phone1_country_code', 'um_phone1_is_mobile',
+      'um_phone1_country', 'um_phone1_area_code', 'um_phone1_area',
+      'um_phone2', 'um_phone2_status', 'um_phone2_format',
+      'um_phone2_country_code', 'um_phone2_is_mobile',
+      'um_phone2_country', 'um_phone2_area_code', 'um_phone2_area',
+      
+      // Unmessy address fields
+      'um_house_number', 'um_street_name', 'um_street_type', 
+      'um_street_direction', 'um_unit_type', 'um_unit_number',
+      'um_address_line_1', 'um_address_line_2',
+      'um_city', 'um_state_province', 'um_country', 
+      'um_country_code', 'um_postal_code', 'um_address_status',
+      
+      // Additional metadata
+      'createdate', 'lastmodifieddate', 'hs_object_id'
+    ];
+
+    const contact = await hubspotService.fetchContact(contactId, apiKey, {
+      properties: properties
+    });
+
+    // Log what data we found for debugging
+    const dataFound = {
+      hasEmail: !!contact.properties?.email,
+      hasPhone: !!contact.properties?.phone,
+      hasMobile: !!contact.properties?.mobilephone,
+      hasAddress: !!contact.properties?.address,
+      hasCity: !!contact.properties?.city,
+      hasState: !!contact.properties?.state,
+      hasZip: !!contact.properties?.zip,
+      hasCountry: !!contact.properties?.country
+    };
+
+    logger.info('Contact data fetched from HubSpot', {
+      contactId,
+      dataFound
+    });
+
+    return contact;
   } catch (error) {
     logger.error('Error fetching contact', {
       contactId,
@@ -131,6 +192,131 @@ async function fetchContactData(contactId, apiKey) {
     });
     return null;
   }
+}
+
+/**
+ * Extract all possible address data from contact properties
+ * @param {Object} contact - HubSpot contact object
+ * @returns {Object} Extracted address data
+ */
+function extractAddressData(contact) {
+  const props = contact.properties || {};
+  
+  return {
+    // Original address fields
+    address: props.address || props.hs_street_address_1 || null,
+    address2: props.address2 || props.hs_street_address_2 || null,
+    city: props.city || props.hs_city || null,
+    state: props.state || props.hs_state_region || null,
+    zip: props.zip || props.postal_code || props.hs_postal_code || null,
+    country: props.country || props.hs_country || null,
+    country_code: props.country_code || null,
+    
+    // Unmessy processed fields (if they exist)
+    um_house_number: props.um_house_number || null,
+    um_street_name: props.um_street_name || null,
+    um_street_type: props.um_street_type || null,
+    um_street_direction: props.um_street_direction || null,
+    um_unit_type: props.um_unit_type || null,
+    um_unit_number: props.um_unit_number || null,
+    um_city: props.um_city || null,
+    um_state_province: props.um_state_province || null,
+    um_country: props.um_country || null,
+    um_country_code: props.um_country_code || null,
+    um_postal_code: props.um_postal_code || null,
+    um_address_status: props.um_address_status || null,
+    um_address_line_1: props.um_address_line_1 || null,
+    um_address_line_2: props.um_address_line_2 || null
+  };
+}
+
+/**
+ * Extract all possible phone data from contact properties
+ * @param {Object} contact - HubSpot contact object
+ * @returns {Object} Extracted phone data
+ */
+function extractPhoneData(contact) {
+  const props = contact.properties || {};
+  
+  return {
+    // Original phone fields
+    phone: props.phone || null,
+    mobilephone: props.mobilephone || null,
+    hs_phone_number: props.hs_phone_number || null,
+    phone_number: props.phone_number || null,
+    mobile_phone_number: props.mobile_phone_number || null,
+    work_phone: props.work_phone || null,
+    home_phone: props.home_phone || null,
+    cell_phone: props.cell_phone || null,
+    
+    // Unmessy processed fields (if they exist)
+    um_phone1: props.um_phone1 || null,
+    um_phone1_status: props.um_phone1_status || null,
+    um_phone1_format: props.um_phone1_format || null,
+    um_phone1_country_code: props.um_phone1_country_code || null,
+    um_phone1_is_mobile: props.um_phone1_is_mobile || null,
+    um_phone1_country: props.um_phone1_country || null,
+    um_phone1_area_code: props.um_phone1_area_code || null,
+    um_phone1_area: props.um_phone1_area || null,
+    
+    um_phone2: props.um_phone2 || null,
+    um_phone2_status: props.um_phone2_status || null,
+    um_phone2_format: props.um_phone2_format || null,
+    um_phone2_country_code: props.um_phone2_country_code || null,
+    um_phone2_is_mobile: props.um_phone2_is_mobile || null,
+    um_phone2_country: props.um_phone2_country || null,
+    um_phone2_area_code: props.um_phone2_area_code || null,
+    um_phone2_area: props.um_phone2_area || null
+  };
+}
+
+/**
+ * Determine if address validation is needed
+ * @param {Object} addressData - Extracted address data
+ * @returns {boolean} Whether address validation is needed
+ */
+function determineAddressValidationNeeds(addressData) {
+  // Has any original address data
+  const hasOriginalAddress = !!(
+    addressData.address || 
+    addressData.city || 
+    addressData.state || 
+    addressData.zip ||
+    addressData.country
+  );
+  
+  // Missing Unmessy processed data
+  const missingProcessedData = !(
+    addressData.um_address_status && 
+    addressData.um_city && 
+    (addressData.um_address_line_1 || addressData.um_street_name)
+  );
+  
+  return hasOriginalAddress && missingProcessedData;
+}
+
+/**
+ * Determine if phone validation is needed
+ * @param {Object} phoneData - Extracted phone data
+ * @returns {boolean} Whether phone validation is needed
+ */
+function determinePhoneValidationNeeds(phoneData) {
+  // Has any original phone data
+  const hasOriginalPhone = !!(
+    phoneData.phone || 
+    phoneData.mobilephone ||
+    phoneData.hs_phone_number ||
+    phoneData.phone_number ||
+    phoneData.mobile_phone_number
+  );
+  
+  // Missing processed data for at least one phone
+  const missingProcessedData = !(
+    (phoneData.um_phone1 && phoneData.um_phone1_status && phoneData.um_phone1_format) ||
+    (phoneData.um_phone2 && phoneData.um_phone2_status && phoneData.um_phone2_format)
+  );
+  
+  return hasOriginalPhone && missingProcessedData;
 }
 
 /**
@@ -205,7 +391,7 @@ async function processWebhookEvent(event, req) {
       }
     }
 
-    // Fetch contact data using client-specific API key
+    // Fetch contact data using client-specific API key with comprehensive properties
     const contact = await fetchContactData(event.objectId, clientConfig.apiKey);
 
     if (!contact) {
@@ -216,6 +402,26 @@ async function processWebhookEvent(event, req) {
       });
       return null;
     }
+
+    // Extract comprehensive data
+    const addressData = extractAddressData(contact);
+    const phoneData = extractPhoneData(contact);
+    
+    // Determine validation needs
+    const needsAddressValidation = determineAddressValidationNeeds(addressData);
+    const needsPhoneValidation = determinePhoneValidationNeeds(phoneData);
+    
+    // Log validation assessment
+    logger.info('Validation needs assessment', {
+      eventId: event.eventId,
+      contactId: event.objectId,
+      needsAddressValidation,
+      needsPhoneValidation,
+      hasOriginalAddress: !!(addressData.address || addressData.city),
+      hasOriginalPhone: !!(phoneData.phone || phoneData.mobilephone),
+      hasProcessedAddress: !!addressData.um_address_status,
+      hasProcessedPhone: !!(phoneData.um_phone1_status || phoneData.um_phone2_status)
+    });
 
     // Create enriched event with all necessary fields
     const enrichedEvent = {
@@ -237,21 +443,13 @@ async function processWebhookEvent(event, req) {
       attempts: 0,
       created_at: new Date().toISOString(),
       
-      // Extract address components if available
-      um_house_number: contact.properties?.um_house_number || null,
-      um_street_name: contact.properties?.um_street_name || null,
-      um_street_type: contact.properties?.um_street_type || null,
-      um_street_direction: contact.properties?.um_street_direction || null,
-      um_unit_type: contact.properties?.um_unit_type || null,
-      um_unit_number: contact.properties?.um_unit_number || null,
-      um_city: contact.properties?.city || null,
-      um_state_province: contact.properties?.state || null,
-      um_country: contact.properties?.country || null,
-      um_country_code: contact.properties?.um_country_code || null,
-      um_postal_code: contact.properties?.zip || contact.properties?.postal_code || null,
-      um_address_status: contact.properties?.um_address_status || null,
+      // Include ALL address data in the queue item
+      ...addressData,
       
-      // Determine validation types needed based on missing Unmessy fields
+      // Include ALL phone data in the queue item
+      ...phoneData,
+      
+      // Determine validation types needed based on comprehensive analysis
       needs_email_validation: !!(contact.properties?.email && 
         (!contact.properties?.um_email || 
          !contact.properties?.um_email_status || 
@@ -259,26 +457,24 @@ async function processWebhookEvent(event, req) {
       
       needs_name_validation: !!(
         (contact.properties?.firstname || contact.properties?.lastname) &&
-        (!contact.properties?.um_firstname || 
-         !contact.properties?.um_lastname ||
+        (!contact.properties?.um_first_name || 
+         !contact.properties?.um_last_name ||
          !contact.properties?.um_name_status)
       ),
       
-      needs_phone_validation: !!(contact.properties?.phone &&
-        (!contact.properties?.um_phone || 
-         !contact.properties?.um_phone_type ||
-         !contact.properties?.um_phone_status)),
-      
-      needs_address_validation: !!(
-        (contact.properties?.address || 
-         contact.properties?.city || 
-         contact.properties?.state || 
-         contact.properties?.zip) &&
-        (!contact.properties?.um_address_status || 
-         !contact.properties?.um_city ||
-         !contact.properties?.um_formatted_address)
-      )
+      needs_phone_validation: needsPhoneValidation,
+      needs_address_validation: needsAddressValidation
     };
+
+    logger.info('Enriched event created', {
+      eventId: event.eventId,
+      validationFlags: {
+        email: enrichedEvent.needs_email_validation,
+        name: enrichedEvent.needs_name_validation,
+        phone: enrichedEvent.needs_phone_validation,
+        address: enrichedEvent.needs_address_validation
+      }
+    });
 
     return enrichedEvent;
   } catch (error) {

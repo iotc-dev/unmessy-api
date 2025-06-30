@@ -146,7 +146,7 @@ class ValidationService {
     return this.validateName(null, { ...options, firstName, lastName });
   }
   
-  // Phone validation
+  // Phone validation - UPDATED to ensure proper return format
   async validatePhone(phone, options = {}) {
     const {
       clientId = null,
@@ -168,38 +168,59 @@ class ValidationService {
         useCache
       });
       
+      // Ensure the result has all the required fields for queue-service
+      const enhancedResult = {
+        ...result,
+        // Ensure these fields exist for queue-service compatibility
+        formatted: result.formatted || result.e164 || phone,
+        wasCorrected: result.wasCorrected || false,
+        formatValid: result.valid || false,
+        isValid: result.valid || false,
+        isMobile: result.isMobile || false,
+        countryCode: result.countryCode || '',
+        country: result.country || country,
+        type: result.type || 'unknown',
+        carrier: result.carrier || null,
+        // Additional fields that might be useful
+        e164: result.e164 || null,
+        national: result.national || null,
+        international: result.international || null,
+        lineType: result.lineType || result.type || 'unknown'
+      };
+      
       if (!result.valid) {
-        return result;
+        return enhancedResult;
       }
       
       // Check cache
       if (useCache && result.e164) {
         const cached = await this.phoneValidator.checkPhoneCache(result.e164);
         if (cached) {
-          return { ...cached, isFromCache: true };
+          return { ...enhancedResult, ...cached, isFromCache: true };
         }
       }
       
       // Save to cache if valid
       if (useCache && result.valid) {
-        await this.phoneValidator.savePhoneCache(phone, result, clientId);
+        await this.phoneValidator.savePhoneCache(phone, enhancedResult, clientId);
       }
       
-      return result;
+      return enhancedResult;
     } catch (error) {
       this.logger.error('Phone validation failed', error, { phone });
       throw new ValidationError(`Phone validation failed: ${error.message}`);
     }
   }
   
-  // Address validation
+  // Address validation - UPDATED to ensure proper return format
   async validateAddress(address, options = {}) {
     const {
       clientId = null,
       country = config.validation.address.defaultCountry,
       skipExternal = false,
       timeout = config.services.openCage.timeout,
-      useCache = true
+      useCache = true,
+      useOpenCage = !skipExternal // Allow explicit control
     } = options;
     
     this.logger.debug('Starting address validation', {
@@ -210,32 +231,69 @@ class ValidationService {
     });
     
     try {
-      // Parse and validate address
-      const parsedResult = await this.addressValidator.validateAddress(address, {
+      // Parse and validate address - handle multiple input formats
+      const addressInput = this.normalizeAddressInput(address);
+      
+      const parsedResult = await this.addressValidator.validateAddress(addressInput, {
         country,
         clientId,
         useCache
       });
       
-      if (!parsedResult.valid) {
-        return parsedResult;
+      // Ensure the result has all required fields for queue-service
+      let result = {
+        ...parsedResult,
+        // Ensure these fields exist
+        valid: parsedResult.valid || false,
+        wasCorrected: parsedResult.wasCorrected || false,
+        confidence: parsedResult.confidence || 0,
+        // Address components
+        houseNumber: parsedResult.houseNumber || parsedResult.um_house_number || '',
+        streetName: parsedResult.streetName || parsedResult.um_street_name || '',
+        streetType: parsedResult.streetType || parsedResult.um_street_type || '',
+        streetDirection: parsedResult.streetDirection || parsedResult.um_street_direction || '',
+        unitType: parsedResult.unitType || parsedResult.um_unit_type || '',
+        unitNumber: parsedResult.unitNumber || parsedResult.um_unit_number || '',
+        city: parsedResult.city || parsedResult.um_city || '',
+        state: parsedResult.state || parsedResult.um_state_province || '',
+        postalCode: parsedResult.postalCode || parsedResult.um_postal_code || '',
+        country: parsedResult.country || parsedResult.um_country || country,
+        countryCode: parsedResult.countryCode || parsedResult.um_country_code || '',
+        // Formatted versions
+        formattedAddress: parsedResult.formattedAddress || parsedResult.formatted || '',
+        um_address_line_1: parsedResult.um_address_line_1 || parsedResult.addressLine1 || '',
+        um_address_line_2: parsedResult.um_address_line_2 || parsedResult.addressLine2 || '',
+        // Keep original parsed result fields
+        um_house_number: parsedResult.houseNumber || parsedResult.um_house_number || '',
+        um_street_name: parsedResult.streetName || parsedResult.um_street_name || '',
+        um_street_type: parsedResult.streetType || parsedResult.um_street_type || '',
+        um_street_direction: parsedResult.streetDirection || parsedResult.um_street_direction || '',
+        um_unit_type: parsedResult.unitType || parsedResult.um_unit_type || '',
+        um_unit_number: parsedResult.unitNumber || parsedResult.um_unit_number || '',
+        um_city: parsedResult.city || parsedResult.um_city || '',
+        um_state_province: parsedResult.state || parsedResult.um_state_province || '',
+        um_postal_code: parsedResult.postalCode || parsedResult.um_postal_code || '',
+        um_country: parsedResult.country || parsedResult.um_country || country,
+        um_country_code: parsedResult.countryCode || parsedResult.um_country_code || ''
+      };
+      
+      if (!result.valid && !useOpenCage) {
+        return result;
       }
       
       // Check cache
-      if (useCache && parsedResult.formattedAddress) {
-        const cached = await this.addressValidator.checkAddressCache(parsedResult.formattedAddress);
+      if (useCache && result.formattedAddress) {
+        const cached = await this.addressValidator.checkAddressCache(result.formattedAddress);
         if (cached) {
-          return { ...cached, isFromCache: true };
+          return { ...result, ...cached, isFromCache: true };
         }
       }
       
       // Enhance with geocoding if needed
-      let result = { ...parsedResult };
-      
-      if (!skipExternal && config.services.openCage.enabled && config.validation.address.geocode) {
+      if (useOpenCage && config.services.openCage.enabled && config.validation.address.geocode) {
         try {
           const geocodeResult = await ErrorRecovery.withTimeout(
-            this.openCage.geocode(parsedResult.formattedAddress, { country }),
+            this.openCage.geocode(result.formattedAddress || this.buildAddressString(result), { country }),
             timeout,
             'OpenCage geocoding'
           );
@@ -244,11 +302,14 @@ class ValidationService {
           result = this.mergeAddressResults(result, geocodeResult);
         } catch (error) {
           this.logger.warn('External address validation failed', error, {
-            address: parsedResult.formattedAddress,
+            address: result.formattedAddress,
             service: 'OpenCage'
           });
           
           // Continue with parsed result
+          if (!result.validationSteps) {
+            result.validationSteps = [];
+          }
           result.validationSteps.push({
             step: 'geocoding',
             error: error.message,
@@ -259,7 +320,7 @@ class ValidationService {
       
       // Save to cache if valid
       if (useCache && result.valid) {
-        await this.addressValidator.saveAddressCache(address, result, clientId);
+        await this.addressValidator.saveAddressCache(addressInput, result, clientId);
       }
       
       return result;
@@ -267,6 +328,56 @@ class ValidationService {
       this.logger.error('Address validation failed', error, { address });
       throw new ValidationError(`Address validation failed: ${error.message}`);
     }
+  }
+  
+  // Helper to normalize address input
+  normalizeAddressInput(address) {
+    if (typeof address === 'string') {
+      return address;
+    }
+    
+    if (typeof address === 'object' && address !== null) {
+      // Handle various object formats
+      if (address.line1 || address.address) {
+        return {
+          address: address.address || address.line1,
+          address2: address.address2 || address.line2,
+          city: address.city,
+          state: address.state || address.stateProvince,
+          postalCode: address.postalCode || address.zip || address.postal_code,
+          country: address.country,
+          countryCode: address.countryCode || address.country_code
+        };
+      }
+      
+      // Already normalized
+      return address;
+    }
+    
+    throw new ValidationError('Invalid address format');
+  }
+  
+  // Helper to build address string from components
+  buildAddressString(components) {
+    const parts = [];
+    
+    if (components.houseNumber) parts.push(components.houseNumber);
+    if (components.streetName) parts.push(components.streetName);
+    if (components.streetType) parts.push(components.streetType);
+    if (components.unitType && components.unitNumber) {
+      parts.push(`${components.unitType} ${components.unitNumber}`);
+    }
+    
+    const street = parts.join(' ');
+    const cityStateZip = [
+      components.city,
+      components.state,
+      components.postalCode
+    ].filter(Boolean).join(', ');
+    
+    return [street, cityStateZip, components.country]
+      .filter(Boolean)
+      .join(', ');
   }
   
   // Batch validation
@@ -308,7 +419,15 @@ class ValidationService {
               result = await this.validateName(item, validationOptions);
               break;
             case 'phone':
-              result = await this.validatePhone(item, validationOptions);
+              // Handle phone objects in batch
+              if (typeof item === 'object' && item.phone) {
+                result = await this.validatePhone(item.phone, {
+                  ...validationOptions,
+                  country: item.country || validationOptions.country
+                });
+              } else {
+                result = await this.validatePhone(item, validationOptions);
+              }
               break;
             case 'address':
               result = await this.validateAddress(item, validationOptions);
@@ -370,7 +489,7 @@ class ValidationService {
   
   // Helper method for merging address results
   mergeAddressResults(parsedResult, geocodeResult) {
-    return {
+    const merged = {
       ...parsedResult,
       geocoding: {
         latitude: geocodeResult.coordinates?.latitude,
@@ -381,7 +500,7 @@ class ValidationService {
         found: geocodeResult.found
       },
       validationSteps: [
-        ...parsedResult.validationSteps,
+        ...(parsedResult.validationSteps || []),
         {
           step: 'geocoding',
           provider: 'opencage',
@@ -389,6 +508,30 @@ class ValidationService {
         }
       ]
     };
+    
+    // Update confidence based on geocoding
+    if (geocodeResult.found && geocodeResult.confidence >= 7) {
+      merged.confidence = Math.max(merged.confidence || 0, geocodeResult.confidence);
+      merged.valid = true;
+    }
+    
+    // Merge any enhanced components from geocoding
+    if (geocodeResult.components) {
+      merged.city = merged.city || geocodeResult.components.city || geocodeResult.components.town;
+      merged.state = merged.state || geocodeResult.components.state || geocodeResult.components.state_code;
+      merged.postalCode = merged.postalCode || geocodeResult.components.postcode;
+      merged.country = merged.country || geocodeResult.components.country;
+      merged.countryCode = merged.countryCode || geocodeResult.components.country_code;
+      
+      // Also update um_ fields
+      merged.um_city = merged.city;
+      merged.um_state_province = merged.state;
+      merged.um_postal_code = merged.postalCode;
+      merged.um_country = merged.country;
+      merged.um_country_code = merged.countryCode;
+    }
+    
+    return merged;
   }
   
   // Get validation service statistics

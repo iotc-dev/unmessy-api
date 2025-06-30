@@ -470,7 +470,7 @@ class QueueService {
     }
   }
   
-  // Fetch contact data from HubSpot
+  // Fetch contact data from HubSpot - UPDATED WITH COMPREHENSIVE PROPERTY LIST
   async fetchContactData(item) {
     try {
       if (!item.object_id) {
@@ -483,17 +483,48 @@ class QueueService {
         throw new Error('HubSpot not enabled for client');
       }
       
-      // Fetch contact from HubSpot
+      // Fetch contact from HubSpot with comprehensive property list
       const contact = await hubspotService.fetchContact(
         item.object_id,
         hubspotConfig.apiKey,
         {
           properties: [
-            'email', 'firstname', 'lastname', 'phone',
-            'address', 'city', 'state', 'zip', 'country',
-            'um_email', 'um_first_name', 'um_last_name',
-            'um_email_status', 'um_bounce_status', 'um_name_status',
-            'um_phone1', 'um_phone2', 'um_phone1_status', 'um_phone2_status'
+            // Standard contact fields
+            'email', 'firstname', 'lastname',
+            
+            // ALL possible phone fields
+            'phone', 'mobilephone', 'hs_phone_number',
+            'phone_number', 'mobile_phone_number',
+            'work_phone', 'home_phone', 'cell_phone',
+            
+            // ALL possible address fields
+            'address', 'address2', 
+            'hs_street_address_1', 'hs_street_address_2',
+            'city', 'state', 'zip', 'postal_code',
+            'hs_city', 'hs_state_region', 'hs_postal_code',
+            'country', 'country_code', 'hs_country',
+            
+            // ALL Unmessy processed fields
+            'um_phone1', 'um_phone1_status', 'um_phone1_format',
+            'um_phone1_country_code', 'um_phone1_is_mobile',
+            'um_phone1_country', 'um_phone1_area_code', 'um_phone1_area',
+            'um_phone2', 'um_phone2_status', 'um_phone2_format',
+            'um_phone2_country_code', 'um_phone2_is_mobile',
+            'um_phone2_country', 'um_phone2_area_code', 'um_phone2_area',
+            
+            // Address fields
+            'um_house_number', 'um_street_name', 'um_street_type',
+            'um_street_direction', 'um_unit_type', 'um_unit_number',
+            'um_address_line_1', 'um_address_line_2',
+            'um_city', 'um_state_province', 'um_country',
+            'um_country_code', 'um_postal_code', 'um_address_status',
+            
+            // Email validation fields
+            'um_email', 'um_email_status', 'um_bounce_status',
+            
+            // Name validation fields
+            'um_first_name', 'um_last_name', 'um_name_status',
+            'um_name_format', 'um_middle_name', 'um_honorific', 'um_suffix'
           ]
         }
       );
@@ -513,7 +544,62 @@ class QueueService {
     }
   }
   
-  // Perform validations based on event type
+  // NEW: Extract phone numbers from contact
+  extractPhoneNumbers(contactData) {
+    const props = contactData?.properties || {};
+    const phoneNumbers = [];
+    
+    // Primary phone
+    if (props.phone) {
+      phoneNumbers.push({
+        number: props.phone,
+        source: 'phone',
+        type: 'primary',
+        country: props.country || 'US'
+      });
+    }
+    
+    // Mobile phone  
+    if (props.mobilephone && props.mobilephone !== props.phone) {
+      phoneNumbers.push({
+        number: props.mobilephone,
+        source: 'mobilephone',
+        type: 'mobile', 
+        country: props.country || 'US'
+      });
+    }
+    
+    return phoneNumbers;
+  }
+
+  // NEW: Check if address data exists
+  hasAddressData(item, contactData) {
+    const props = contactData?.properties || {};
+    return !!(
+      props.address || props.hs_street_address_1 ||
+      props.city || props.hs_city ||
+      props.state || props.hs_state_region ||
+      props.zip || props.postal_code ||
+      props.country || props.hs_country
+    );
+  }
+
+  // NEW: Build address object from all sources
+  buildAddressObject(item, contactData) {
+    const props = contactData?.properties || {};
+    
+    return {
+      address: props.address || props.hs_street_address_1,
+      address2: props.address2 || props.hs_street_address_2,
+      city: props.city || props.hs_city,
+      state: props.state || props.hs_state_region,
+      postalCode: props.zip || props.postal_code,
+      country: props.country || props.hs_country,
+      countryCode: props.country_code
+    };
+  }
+  
+  // Perform validations based on event type - UPDATED WITH MULTI-PHONE SUPPORT
   async performValidations(item, contactData) {
     const results = {};
     
@@ -526,12 +612,11 @@ class QueueService {
       (contactData?.properties?.firstname || contactData?.properties?.lastname);
       
     const shouldValidatePhone = 
-      item.needs_phone_validation && contactData?.properties?.phone;
+      item.needs_phone_validation && 
+      (contactData?.properties?.phone || contactData?.properties?.mobilephone);
       
     const shouldValidateAddress = 
-      item.needs_address_validation && 
-      (contactData?.properties?.address || contactData?.properties?.city || 
-       contactData?.properties?.state || contactData?.properties?.zip);
+      item.needs_address_validation && this.hasAddressData(item, contactData);
     
     // Run validations in parallel
     const validationPromises = [];
@@ -565,27 +650,40 @@ class QueueService {
       );
     }
     
+    // Enhanced phone validation - handle multiple phones
     if (shouldValidatePhone) {
-      validationPromises.push(
-        validationService.validatePhone(contactData.properties.phone, {
-          clientId: item.client_id
-        }).then(result => {
-          results.phone = result;
-        }).catch(error => {
-          this.logger.error('Phone validation failed', error);
-          results.phone = { error: error.message };
-        })
-      );
+      const phoneNumbers = this.extractPhoneNumbers(contactData);
+      
+      if (phoneNumbers.length > 0) {
+        const phoneValidationPromises = phoneNumbers.map(async (phoneData, index) => {
+          try {
+            const result = await validationService.validatePhone(phoneData.number, {
+              clientId: item.client_id,
+              country: phoneData.country
+            });
+            
+            return {
+              ...result,
+              originalNumber: phoneData.number,
+              source: phoneData.source,
+              index
+            };
+          } catch (error) {
+            return { 
+              error: error.message,
+              originalNumber: phoneData.number,
+              source: phoneData.source
+            };
+          }
+        });
+        
+        const phoneResults = await Promise.all(phoneValidationPromises);
+        results.phones = phoneResults; // Changed from 'phone' to 'phones'
+      }
     }
     
     if (shouldValidateAddress) {
-      const addressData = {
-        line1: contactData.properties.address,
-        city: contactData.properties.city,
-        state: contactData.properties.state,
-        postalCode: contactData.properties.zip,
-        country: contactData.properties.country
-      };
+      const addressData = this.buildAddressObject(item, contactData);
       
       validationPromises.push(
         validationService.validateAddress(addressData, {
@@ -718,7 +816,100 @@ class QueueService {
     }
   }
   
-  // Build form data for HubSpot submission with proper fields array structure
+  // NEW: Add phone fields with correct property mapping
+  addPhoneFieldsToForm(fields, item, contactData, validationResults) {
+    const phoneResults = validationResults.phones.filter(p => !p.error);
+    
+    phoneResults.forEach((phoneResult, index) => {
+      const phoneNum = index + 1;
+      const prefix = `um_phone${phoneNum}`;
+      
+      // Phone number (formatted)
+      fields.push({
+        name: prefix,
+        value: phoneResult.formatted || phoneResult.originalNumber || ''
+      });
+      
+      // Status (Changed/Unchanged based on formatting)
+      fields.push({
+        name: `${prefix}_status`,
+        value: phoneResult.wasCorrected ? 'Changed' : 'Unchanged'
+      });
+      
+      // Format (Valid/Invalid based on validation)
+      fields.push({
+        name: `${prefix}_format`,
+        value: phoneResult.formatValid ? 'Valid' : 'Invalid'
+      });
+      
+      // Country code
+      fields.push({
+        name: `${prefix}_country_code`,
+        value: phoneResult.countryCode || ''
+      });
+      
+      // Is mobile (true/false based on line type)
+      fields.push({
+        name: `${prefix}_is_mobile`,
+        value: phoneResult.isMobile ? 'true' : 'false'
+      });
+      
+      // Country name
+      fields.push({
+        name: `${prefix}_country`,
+        value: phoneResult.country || ''
+      });
+    });
+  }
+
+  // NEW: Fallback phone fields
+  addFallbackPhoneFields(fields, props) {
+    const phones = [];
+    
+    if (props.phone) {
+      phones.push({ number: props.phone, source: 'phone', isMobile: false });
+    }
+    
+    if (props.mobilephone && props.mobilephone !== props.phone) {
+      phones.push({ number: props.mobilephone, source: 'mobilephone', isMobile: true });
+    }
+    
+    phones.forEach((phone, index) => {
+      const phoneNum = index + 1;
+      const prefix = `um_phone${phoneNum}`;
+      
+      fields.push({ name: prefix, value: phone.number });
+      fields.push({ name: `${prefix}_status`, value: 'Unchanged' });
+      fields.push({ name: `${prefix}_format`, value: 'Unprocessed' });
+      fields.push({ name: `${prefix}_is_mobile`, value: phone.isMobile ? 'true' : 'false' });
+    });
+  }
+
+  // NEW: Add fallback address fields
+  addFallbackAddressFields(fields, item, contactData) {
+    const props = contactData?.properties || {};
+    
+    const fallbackFields = [
+      { name: 'um_city', value: props.city || props.hs_city || '' },
+      { name: 'um_state_province', value: props.state || props.hs_state_region || '' },
+      { name: 'um_postal_code', value: props.zip || props.postal_code || '' },
+      { name: 'um_country', value: props.country || props.hs_country || '' },
+      { name: 'um_address_status', value: 'Unprocessed' }
+    ];
+    
+    // Primary address line
+    const primaryAddress = props.address || props.hs_street_address_1;
+    if (primaryAddress) {
+      fields.push({ name: 'um_address_line_1', value: primaryAddress });
+    }
+    
+    // Add fallback fields
+    fallbackFields.forEach(field => {
+      if (field.value) fields.push(field);
+    });
+  }
+
+  // Build form data for HubSpot submission with proper fields array structure - UPDATED
   buildFormData(item, contactData, validationResults, clientId) {
     const fields = [];
     
@@ -853,70 +1044,14 @@ class QueueService {
       }
     }
     
-    // Add phone validation results (um_ fields)
-    if (validationResults?.phone && !validationResults.phone.error) {
-      const phoneResult = validationResults.phone;
-      
-      // Determine whether to use um_phone1 or um_phone2
-      const existingPhone1 = contactData?.properties?.um_phone1;
-      const usePhone2 = existingPhone1 && existingPhone1.trim() !== '';
-      
-      if (usePhone2) {
-        // Use um_phone2 fields if um_phone1 already has a value
-        fields.push({
-          name: 'um_phone2',
-          value: phoneResult.formatted || ''
-        });
-        fields.push({
-          name: 'um_phone2_status',
-          value: phoneResult.isValid ? 'Valid' : 'Invalid'
-        });
-        fields.push({
-          name: 'um_phone_2_format',
-          value: phoneResult.type || 'unknown'
-        });
-        fields.push({
-          name: 'um_phone2_country_code',
-          value: phoneResult.countryCode || ''
-        });
-        fields.push({
-          name: 'um_phone2_is_mobile',
-          value: phoneResult.isMobile ? 'Yes' : 'No'
-        });
-        fields.push({
-          name: 'um_phone2_country',
-          value: phoneResult.country || ''
-        });
-      } else {
-        // Default to um_phone1 fields
-        fields.push({
-          name: 'um_phone1',
-          value: phoneResult.formatted || ''
-        });
-        fields.push({
-          name: 'um_phone1_status',
-          value: phoneResult.isValid ? 'Valid' : 'Invalid'
-        });
-        fields.push({
-          name: 'um_phone1_format',
-          value: phoneResult.type || 'unknown'
-        });
-        fields.push({
-          name: 'um_phone1_country_code',
-          value: phoneResult.countryCode || ''
-        });
-        fields.push({
-          name: 'um_phone1_is_mobile',
-          value: phoneResult.isMobile ? 'Yes' : 'No'
-        });
-        fields.push({
-          name: 'um_phone1_country',
-          value: phoneResult.country || ''
-        });
-      }
+    // UPDATED: Add phone validation results with new logic
+    if (validationResults?.phones && Array.isArray(validationResults.phones)) {
+      this.addPhoneFieldsToForm(fields, item, contactData, validationResults);
+    } else {
+      this.addFallbackPhoneFields(fields, contactData?.properties || {});
     }
     
-    // Add address validation results
+    // UPDATED: Add address validation results with fallback support
     if (validationResults?.address && !validationResults.address.error) {
       const addressResult = validationResults.address;
       
@@ -956,6 +1091,9 @@ class QueueService {
           fields.push(field);
         }
       });
+    } else {
+      // Use fallback address fields
+      this.addFallbackAddressFields(fields, item, contactData);
     }
     
     // Log final field count and names
@@ -1021,7 +1159,8 @@ class QueueService {
       );
     }
     
-    if (validationResults?.phone && !validationResults.phone.error) {
+    if (validationResults?.phones) {
+      // For phones, increment once regardless of how many phone numbers were validated
       promises.push(
         clientService.incrementUsage(clientId, 'phone')
           .catch(err => this.logger.error('Failed to update phone rate limit', err))
