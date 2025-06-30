@@ -432,6 +432,22 @@ class EmailValidationService {
     }
   }
   
+  // FIXED: Map ZeroBounce status to correct um_bounce_status
+  mapBounceStatus(zbStatus, subStatus) {
+    // Only two allowed values: "Likely to bounce" or "Unlikely to bounce"
+    
+    // List of statuses that mean the email is valid and unlikely to bounce
+    const validStatuses = ['valid'];
+    
+    // Everything else is likely to bounce
+    if (validStatuses.includes(zbStatus?.toLowerCase())) {
+      return 'Unlikely to bounce';
+    }
+    
+    // All other statuses (invalid, catch-all, spamtrap, abuse, do_not_mail, unknown, etc.)
+    return 'Likely to bounce';
+  }
+  
   // Main validation method - UPDATED with new flow
   async validateEmail(email, options = {}) {
     const { clientId = null, useCache = true, useZeroBounce = true } = options;
@@ -637,7 +653,9 @@ class EmailValidationService {
     // Check if domain is in valid domains list
     const domainValid = this.validDomains.has(domain);
     const status = domainValid && mxCheck.hasMxRecords ? 'valid' : 'unknown';
-    const umBounceStatus = domainValid && mxCheck.hasMxRecords ? 'Unlikely to bounce' : 'Unknown';
+    
+    // FIXED: Use proper bounce status mapping
+    const umBounceStatus = (domainValid && mxCheck.hasMxRecords) ? 'Unlikely to bounce' : 'Likely to bounce';
     
     return this.buildValidationResult(originalEmail, {
       currentEmail: correctedEmail,
@@ -667,19 +685,16 @@ class EmailValidationService {
     // Determine final status based on ZeroBounce
     let status = 'unknown';
     let subStatus = zbResult.subStatus;
-    let umBounceStatus = 'Unknown';
+    
+    // FIXED: Use the new mapping function
+    const umBounceStatus = this.mapBounceStatus(zbResult.status, zbResult.subStatus);
     
     if (zbResult.status === 'valid') {
       status = 'valid';
-      umBounceStatus = 'Unlikely to bounce';
     } else if (zbResult.status === 'invalid' || zbResult.status === 'catch-all' || 
-               zbResult.status === 'spamtrap' || zbResult.status === 'abuse') {
+               zbResult.status === 'spamtrap' || zbResult.status === 'abuse' || 
+               zbResult.status === 'do_not_mail') {
       status = 'invalid';
-      umBounceStatus = 'Likely to bounce';
-    } else if (zbResult.status === 'do_not_mail') {
-      status = 'invalid';
-      subStatus = 'do_not_mail';
-      umBounceStatus = 'Do not mail';
     }
     
     // Build validation steps
@@ -783,7 +798,7 @@ class EmailValidationService {
     const umEmailStatus = validationData.wasCorrected ? 'Changed' : 'Unchanged';
     
     // Determine um_bounce_status (already set in validation data)
-    const umBounceStatus = validationData.um_bounce_status || 'Unknown';
+    const umBounceStatus = validationData.um_bounce_status || 'Likely to bounce';
     
     // Build validation steps
     const validationSteps = [

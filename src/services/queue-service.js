@@ -921,18 +921,21 @@ class QueueService {
       validationResultKeys: Object.keys(validationResults || {})
     });
     
-    // Always use current time for epoch, never trust incoming data
-    const currentEpochSeconds = Math.floor(Date.now() / 1000);
+    // FIXED: Use milliseconds for epoch (13 digits) instead of seconds (10 digits)
+    const currentEpochMilliseconds = Date.now();
     
-    // Add epoch with validation
+    // Add epoch with validation - HubSpot expects milliseconds as string
     fields.push({
       name: 'date_last_um_check_epoch',
-      value: currentEpochSeconds.toString()
+      value: currentEpochMilliseconds.toString()
     });
     
-    this.logger.info('Using epoch', {
-      epochSeconds: currentEpochSeconds,
-      date: new Date(currentEpochSeconds * 1000).toISOString()
+    // Log for debugging
+    this.logger.info('Setting date_last_um_check_epoch', {
+      epochMs: currentEpochMilliseconds,
+      epochString: currentEpochMilliseconds.toString(),
+      digits: currentEpochMilliseconds.toString().length,
+      date: new Date(currentEpochMilliseconds).toISOString()
     });
     
     // Generate UM check ID
@@ -1100,7 +1103,7 @@ class QueueService {
     this.logger.info('Form data built', {
       fieldCount: fields.length,
       fieldNames: fields.map(f => f.name),
-      epochValue: currentEpochSeconds
+      epochValue: currentEpochMilliseconds // Updated from currentEpochSeconds
     });
     
     // Return in the format expected by HubSpot service

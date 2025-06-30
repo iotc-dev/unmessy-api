@@ -315,31 +315,107 @@ class ClientService {
     }
   }
   
-  // Record validation metric
+  // Record validation metric - FIXED VERSION with proper INSERT/UPDATE logic
   async recordValidationMetric(clientId, validationType, success, responseTime, errorType = null) {
     try {
-      // Use RPC to call the database function
-      await db.rpc('record_validation_metric', {
-        p_client_id: clientId,
-        p_validation_type: validationType,
-        p_success: success,
-        p_response_time_ms: responseTime,
-        p_error_type: errorType
-      });
+      const now = new Date();
+      const date = now.toISOString().split('T')[0]; // YYYY-MM-DD
+      const hour = now.getHours();
       
-      this.logger.debug('Validation metric recorded', {
-        clientId,
-        validationType,
-        success,
-        responseTime
-      });
+      // Build the metric data
+      const metricData = {
+        client_id: String(clientId),
+        validation_type: validationType,
+        date: date,
+        hour: hour,
+        total_requests: 1,
+        successful_validations: success ? 1 : 0,
+        failed_validations: success ? 0 : 1,
+        invalid_results: 0, // This would need to be passed in if we track invalid vs failed
+        avg_response_time_ms: responseTime || 0,
+        min_response_time_ms: responseTime || 0,
+        max_response_time_ms: responseTime || 0,
+        timeout_errors: errorType === 'timeout' ? 1 : 0,
+        external_api_errors: errorType === 'external_api' ? 1 : 0,
+        internal_errors: errorType === 'internal' ? 1 : 0,
+        zerobounce_calls: validationType === 'email' && success ? 1 : 0,
+        opencage_calls: validationType === 'address' && success ? 1 : 0,
+        corrections_applied: 0 // This would need to be passed in if we track corrections
+      };
+      
+      // Try to insert first
+      try {
+        await db.insert('validation_metrics', metricData);
+        
+        this.logger.debug('New validation metric created', {
+          clientId,
+          validationType,
+          date,
+          hour
+        });
+      } catch (insertError) {
+        // If we get a unique constraint violation, update instead
+        if (insertError.code === '23505') {
+          // Update existing record
+          const updateQuery = `
+            UPDATE validation_metrics 
+            SET 
+              total_requests = total_requests + 1,
+              successful_validations = successful_validations + $1,
+              failed_validations = failed_validations + $2,
+              timeout_errors = timeout_errors + $3,
+              external_api_errors = external_api_errors + $4,
+              internal_errors = internal_errors + $5,
+              zerobounce_calls = zerobounce_calls + $6,
+              opencage_calls = opencage_calls + $7,
+              avg_response_time_ms = CASE 
+                WHEN total_requests = 0 THEN $8
+                ELSE ((avg_response_time_ms * total_requests) + $8) / (total_requests + 1)
+              END,
+              min_response_time_ms = LEAST(COALESCE(min_response_time_ms, $8), $8),
+              max_response_time_ms = GREATEST(COALESCE(max_response_time_ms, $8), $8)
+            WHERE 
+              client_id = $9 
+              AND validation_type = $10 
+              AND date = $11 
+              AND hour = $12
+          `;
+          
+          await db.query(updateQuery, [
+            success ? 1 : 0,                                    // $1: successful_validations
+            success ? 0 : 1,                                    // $2: failed_validations
+            errorType === 'timeout' ? 1 : 0,                   // $3: timeout_errors
+            errorType === 'external_api' ? 1 : 0,              // $4: external_api_errors
+            errorType === 'internal' ? 1 : 0,                  // $5: internal_errors
+            validationType === 'email' && success ? 1 : 0,     // $6: zerobounce_calls
+            validationType === 'address' && success ? 1 : 0,   // $7: opencage_calls
+            responseTime || 0,                                  // $8: response_time_ms
+            String(clientId),                                   // $9: client_id
+            validationType,                                     // $10: validation_type
+            date,                                              // $11: date
+            hour                                               // $12: hour
+          ]);
+          
+          this.logger.debug('Validation metric updated', {
+            clientId,
+            validationType,
+            date,
+            hour
+          });
+        } else {
+          // Some other error occurred
+          throw insertError;
+        }
+      }
+      
     } catch (error) {
       // Don't throw - metrics are non-critical
       this.logger.error('Failed to record metric', error, {
         clientId,
         validationType,
         success,
-        responseTime
+        responseTime,
+        errorType
       });
     }
   }

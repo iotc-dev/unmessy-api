@@ -25,6 +25,8 @@ router.post('/email',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
     const { clientId } = req;
+    let validationResult = null;
+    let errorType = null;
     
     try {
       // Get email from request
@@ -48,7 +50,7 @@ router.post('/email',
       });
       
       // Validate email
-      const validationResult = await validationService.validateEmail(email, {
+      validationResult = await validationService.validateEmail(email, {
         clientId,
         skipZeroBounce: req.query.skipExternal === 'true'
       });
@@ -75,11 +77,16 @@ router.post('/email',
       
       // Record metrics
       const responseTime = Date.now() - startTime;
+      const isSuccess = validationResult.status === 'valid' || 
+                       validationResult.status === 'catch-all' || 
+                       validationResult.status === 'unknown';
+                       
       await clientService.recordValidationMetric(
         clientId, 
         'email', 
-        validationResult.status === 'valid', 
-        responseTime
+        isSuccess,
+        responseTime,
+        errorType
       );
       
       // Log success
@@ -92,7 +99,27 @@ router.post('/email',
       return res.status(200).json(response);
       
     } catch (error) {
-      // Error will be handled by error-handler middleware
+      // Record failed metric
+      const responseTime = Date.now() - startTime;
+      
+      // Determine error type
+      if (error.name === 'ExternalServiceError') {
+        errorType = 'external_api';
+      } else if (error.name === 'TimeoutError') {
+        errorType = 'timeout';
+      } else {
+        errorType = 'internal';
+      }
+      
+      await clientService.recordValidationMetric(
+        clientId, 
+        'email', 
+        false,
+        responseTime,
+        errorType
+      );
+      
+      // Re-throw error to be handled by error-handler middleware
       throw error;
     }
   })
@@ -108,6 +135,8 @@ router.post('/name',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
     const { clientId } = req;
+    let validationResult = null;
+    let errorType = null;
     
     try {
       // Get name from request (either full name or first/last)
@@ -132,7 +161,6 @@ router.post('/name',
       });
       
       // Validate name (either full name or separate first/last)
-      let validationResult;
       if (name) {
         validationResult = await validationService.validateFullName(name, { clientId });
       } else if (first_name || last_name) {
@@ -163,11 +191,14 @@ router.post('/name',
       
       // Record metrics
       const responseTime = Date.now() - startTime;
+      const isSuccess = validationResult.status === 'valid';
+      
       await clientService.recordValidationMetric(
         clientId, 
         'name', 
-        validationResult.status === 'valid', 
-        responseTime
+        isSuccess,
+        responseTime,
+        errorType
       );
       
       // Log success
@@ -180,7 +211,27 @@ router.post('/name',
       return res.status(200).json(response);
       
     } catch (error) {
-      // Error will be handled by error-handler middleware
+      // Record failed metric
+      const responseTime = Date.now() - startTime;
+      
+      // Determine error type
+      if (error.name === 'ExternalServiceError') {
+        errorType = 'external_api';
+      } else if (error.name === 'TimeoutError') {
+        errorType = 'timeout';
+      } else {
+        errorType = 'internal';
+      }
+      
+      await clientService.recordValidationMetric(
+        clientId, 
+        'name', 
+        false,
+        responseTime,
+        errorType
+      );
+      
+      // Re-throw error to be handled by error-handler middleware
       throw error;
     }
   })
@@ -196,6 +247,8 @@ router.post('/phone',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
     const { clientId } = req;
+    let validationResult = null;
+    let errorType = null;
     
     try {
       // Get phone number from request
@@ -220,7 +273,7 @@ router.post('/phone',
       });
       
       // Validate phone number
-      const validationResult = await validationService.validatePhone(phone, {
+      validationResult = await validationService.validatePhone(phone, {
         clientId,
         country: country || config.validation.phone.defaultCountry
       });
@@ -245,26 +298,49 @@ router.post('/phone',
         }
       };
       
-      // Record metrics
+      // Record metrics - Fixed to check isValid instead of valid
       const responseTime = Date.now() - startTime;
+      const isSuccess = validationResult.isValid === true;
+      
       await clientService.recordValidationMetric(
         clientId, 
         'phone', 
-        validationResult.valid, 
-        responseTime
+        isSuccess,
+        responseTime,
+        errorType
       );
       
       // Log success
       logger.info('Phone validation completed', {
         clientId,
-        valid: validationResult.valid,
+        valid: validationResult.isValid,
         responseTime: `${responseTime}ms`
       });
       
       return res.status(200).json(response);
       
     } catch (error) {
-      // Error will be handled by error-handler middleware
+      // Record failed metric
+      const responseTime = Date.now() - startTime;
+      
+      // Determine error type
+      if (error.name === 'ExternalServiceError') {
+        errorType = 'external_api';
+      } else if (error.name === 'TimeoutError') {
+        errorType = 'timeout';
+      } else {
+        errorType = 'internal';
+      }
+      
+      await clientService.recordValidationMetric(
+        clientId, 
+        'phone', 
+        false,
+        responseTime,
+        errorType
+      );
+      
+      // Re-throw error to be handled by error-handler middleware
       throw error;
     }
   })
@@ -280,6 +356,8 @@ router.post('/address',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
     const { clientId } = req;
+    let validationResult = null;
+    let errorType = null;
     
     try {
       // Get address data from request
@@ -304,7 +382,7 @@ router.post('/address',
       });
       
       // Validate address
-      const validationResult = await validationService.validateAddress(addressData, {
+      validationResult = await validationService.validateAddress(addressData, {
         clientId,
         useOpenCage: req.query.skipGeocoding !== 'true' && config.validation.address.geocode,
         country: addressData.country_code || config.validation.address.defaultCountry
@@ -330,19 +408,22 @@ router.post('/address',
         }
       };
       
-      // Record metrics
+      // Record metrics - Fixed to check isValid instead of valid
       const responseTime = Date.now() - startTime;
+      const isSuccess = validationResult.isValid === true;
+      
       await clientService.recordValidationMetric(
         clientId, 
         'address', 
-        validationResult.valid, 
-        responseTime
+        isSuccess,
+        responseTime,
+        errorType
       );
       
       // Log success
       logger.info('Address validation completed', {
         clientId,
-        valid: validationResult.valid,
+        valid: validationResult.isValid,
         confidence: validationResult.confidence,
         responseTime: `${responseTime}ms`
       });
@@ -350,7 +431,27 @@ router.post('/address',
       return res.status(200).json(response);
       
     } catch (error) {
-      // Error will be handled by error-handler middleware
+      // Record failed metric
+      const responseTime = Date.now() - startTime;
+      
+      // Determine error type
+      if (error.name === 'ExternalServiceError') {
+        errorType = 'external_api';
+      } else if (error.name === 'TimeoutError') {
+        errorType = 'timeout';
+      } else {
+        errorType = 'internal';
+      }
+      
+      await clientService.recordValidationMetric(
+        clientId, 
+        'address', 
+        false,
+        responseTime,
+        errorType
+      );
+      
+      // Re-throw error to be handled by error-handler middleware
       throw error;
     }
   })
@@ -365,6 +466,7 @@ router.post('/batch',
   asyncHandler(async (req, res) => {
     const startTime = Date.now();
     const { clientId } = req;
+    let errorType = null;
     
     try {
       const { items, type } = req.body;
@@ -403,42 +505,97 @@ router.post('/batch',
       
       // Process each item
       let results = [];
+      let successCount = 0;
+      let failureCount = 0;
       
       switch (type) {
         case 'email':
           results = await Promise.all(
-            items.map(email => validationService.validateEmail(email, { clientId }))
+            items.map(async (email) => {
+              try {
+                const result = await validationService.validateEmail(email, { clientId });
+                if (result.status === 'valid' || result.status === 'catch-all' || result.status === 'unknown') {
+                  successCount++;
+                } else {
+                  failureCount++;
+                }
+                return result;
+              } catch (error) {
+                failureCount++;
+                return { error: error.message };
+              }
+            })
           );
           break;
         case 'name':
           results = await Promise.all(
-            items.map(name => {
-              if (typeof name === 'string') {
-                return validationService.validateFullName(name, { clientId });
-              } else if (name.first_name || name.last_name) {
-                return validationService.validateSeparateNames(
-                  name.first_name, 
-                  name.last_name, 
-                  { clientId }
-                );
-              } else {
-                return { error: 'Invalid name format' };
+            items.map(async (name) => {
+              try {
+                let result;
+                if (typeof name === 'string') {
+                  result = await validationService.validateFullName(name, { clientId });
+                } else if (name.first_name || name.last_name) {
+                  result = await validationService.validateSeparateNames(
+                    name.first_name, 
+                    name.last_name, 
+                    { clientId }
+                  );
+                } else {
+                  failureCount++;
+                  return { error: 'Invalid name format' };
+                }
+                
+                if (result.status === 'valid') {
+                  successCount++;
+                } else {
+                  failureCount++;
+                }
+                return result;
+              } catch (error) {
+                failureCount++;
+                return { error: error.message };
               }
             })
           );
           break;
         case 'phone':
           results = await Promise.all(
-            items.map(item => {
-              const phone = typeof item === 'string' ? item : item.phone;
-              const country = item.country || config.validation.phone.defaultCountry;
-              return validationService.validatePhone(phone, { clientId, country });
+            items.map(async (item) => {
+              try {
+                const phone = typeof item === 'string' ? item : item.phone;
+                const country = item.country || config.validation.phone.defaultCountry;
+                const result = await validationService.validatePhone(phone, { clientId, country });
+                
+                if (result.isValid) {
+                  successCount++;
+                } else {
+                  failureCount++;
+                }
+                return result;
+              } catch (error) {
+                failureCount++;
+                return { error: error.message };
+              }
             })
           );
           break;
         case 'address':
           results = await Promise.all(
-            items.map(address => validationService.validateAddress(address, { clientId }))
+            items.map(async (address) => {
+              try {
+                const result = await validationService.validateAddress(address, { clientId });
+                
+                if (result.isValid) {
+                  successCount++;
+                } else {
+                  failureCount++;
+                }
+                return result;
+              } catch (error) {
+                failureCount++;
+                return { error: error.message };
+              }
+            })
           );
           break;
       }
@@ -449,13 +606,16 @@ router.post('/batch',
       // Get client stats for response
       const clientStats = await clientService.getClientStats(clientId);
       
-      // Record metrics
+      // Record metrics with success/failure counts
       const responseTime = Date.now() - startTime;
+      const overallSuccess = failureCount === 0;
+      
       await clientService.recordValidationMetric(
         clientId, 
-        `batch_${type}`, 
-        true, 
-        responseTime
+        type, 
+        overallSuccess,
+        responseTime,
+        errorType
       );
       
       // Log success
@@ -463,6 +623,8 @@ router.post('/batch',
         clientId,
         type,
         itemCount: items.length,
+        successCount,
+        failureCount,
         responseTime: `${responseTime}ms`
       });
       
@@ -470,6 +632,8 @@ router.post('/batch',
       return res.status(200).json({
         results,
         count: results.length,
+        successCount,
+        failureCount,
         client: {
           id: clientStats.clientId,
           name: clientStats.name,
@@ -481,7 +645,27 @@ router.post('/batch',
       });
       
     } catch (error) {
-      // Error will be handled by error-handler middleware
+      // Record failed metric
+      const responseTime = Date.now() - startTime;
+      
+      // Determine error type
+      if (error.name === 'ExternalServiceError') {
+        errorType = 'external_api';
+      } else if (error.name === 'TimeoutError') {
+        errorType = 'timeout';
+      } else {
+        errorType = 'internal';
+      }
+      
+      await clientService.recordValidationMetric(
+        clientId, 
+        'batch', 
+        false,
+        responseTime,
+        errorType
+      );
+      
+      // Re-throw error to be handled by error-handler middleware
       throw error;
     }
   })
