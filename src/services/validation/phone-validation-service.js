@@ -838,7 +838,7 @@ class PhoneValidationService {
     return cleaned;
   }
   
-  // Get country name from code (keeping abbreviated for space)
+  // Get country name from code - FIXED TO RETURN FULL NAMES
   getCountryName(countryCode) {
     const countryNames = {
       'US': 'United States',
@@ -897,18 +897,169 @@ class PhoneValidationService {
       'BM': 'Bermuda',
       'KY': 'Cayman Islands',
       'VG': 'British Virgin Islands',
+      'VI': 'US Virgin Islands',
       'CC': 'Cocos Islands',
       'CX': 'Christmas Island',
       'GU': 'Guam',
       'AS': 'American Samoa',
       'MP': 'Northern Mariana Islands',
-      // Add all other countries...
+      'BE': 'Belgium',
+      'CH': 'Switzerland',
+      'AT': 'Austria',
+      'LU': 'Luxembourg',
+      'MC': 'Monaco',
+      'LI': 'Liechtenstein',
+      'PT': 'Portugal',
+      'IE': 'Ireland',
+      'IS': 'Iceland',
+      'MT': 'Malta',
+      'CY': 'Cyprus',
+      'GR': 'Greece',
+      'TR': 'Turkey',
+      'IL': 'Israel',
+      'EG': 'Egypt',
+      'SA': 'Saudi Arabia',
+      'AE': 'United Arab Emirates',
+      'QA': 'Qatar',
+      'KW': 'Kuwait',
+      'BH': 'Bahrain',
+      'OM': 'Oman',
+      'JO': 'Jordan',
+      'LB': 'Lebanon',
+      'SY': 'Syria',
+      'IQ': 'Iraq',
+      'IR': 'Iran',
+      'AF': 'Afghanistan',
+      'PK': 'Pakistan',
+      'BD': 'Bangladesh',
+      'LK': 'Sri Lanka',
+      'MM': 'Myanmar',
+      'KH': 'Cambodia',
+      'LA': 'Laos',
+      'BN': 'Brunei',
+      'TL': 'East Timor',
+      'MN': 'Mongolia',
+      'KP': 'North Korea',
+      'KZ': 'Kazakhstan',
+      'UZ': 'Uzbekistan',
+      'TM': 'Turkmenistan',
+      'KG': 'Kyrgyzstan',
+      'TJ': 'Tajikistan',
+      'UA': 'Ukraine',
+      'BY': 'Belarus',
+      'MD': 'Moldova',
+      'RO': 'Romania',
+      'BG': 'Bulgaria',
+      'RS': 'Serbia',
+      'HR': 'Croatia',
+      'SI': 'Slovenia',
+      'BA': 'Bosnia and Herzegovina',
+      'ME': 'Montenegro',
+      'MK': 'North Macedonia',
+      'AL': 'Albania',
+      'HU': 'Hungary',
+      'CZ': 'Czech Republic',
+      'SK': 'Slovakia',
+      'LT': 'Lithuania',
+      'LV': 'Latvia',
+      'EE': 'Estonia',
+      'GE': 'Georgia',
+      'AM': 'Armenia',
+      'AZ': 'Azerbaijan',
+      'MD': 'Moldova',
+      'BY': 'Belarus',
+      'UA': 'Ukraine',
+      'RU': 'Russia',
+      'KZ': 'Kazakhstan',
+      'UZ': 'Uzbekistan',
+      'TM': 'Turkmenistan',
+      'TJ': 'Tajikistan',
+      'KG': 'Kyrgyzstan',
+      'VA': 'Vatican City',
+      'SM': 'San Marino',
+      'AD': 'Andorra',
+      'LI': 'Liechtenstein',
+      'MC': 'Monaco',
+      'GI': 'Gibraltar',
+      'FO': 'Faroe Islands',
+      'GL': 'Greenland',
+      'AX': 'Åland Islands',
+      'SJ': 'Svalbard and Jan Mayen',
+      'BV': 'Bouvet Island',
+      'IM': 'Isle of Man',
+      'JE': 'Jersey',
+      'GG': 'Guernsey',
+      'BL': 'Saint Barthélemy',
+      'MF': 'Saint Martin',
+      'PM': 'Saint Pierre and Miquelon',
+      'WF': 'Wallis and Futuna',
+      'PF': 'French Polynesia',
+      'NC': 'New Caledonia',
+      'TF': 'French Southern Territories',
+      'YT': 'Mayotte',
+      'RE': 'Réunion',
+      'GP': 'Guadeloupe',
+      'GF': 'French Guiana',
+      'MQ': 'Martinique',
+      'KE': 'Kenya',
+      'ET': 'Ethiopia',
+      'NG': 'Nigeria',
+      'GH': 'Ghana',
+      'TZ': 'Tanzania',
+      'UG': 'Uganda',
+      'ZW': 'Zimbabwe',
+      'ZM': 'Zambia',
+      'MW': 'Malawi',
+      'MZ': 'Mozambique',
+      'BW': 'Botswana',
+      'NA': 'Namibia',
+      'SZ': 'Eswatini',
+      'LS': 'Lesotho',
+      'MG': 'Madagascar',
+      'MU': 'Mauritius',
+      'SC': 'Seychelles',
+      'SO': 'Somalia',
+      'DJ': 'Djibouti',
+      'ER': 'Eritrea',
+      'SD': 'Sudan',
+      'SS': 'South Sudan',
+      'CF': 'Central African Republic',
+      'TD': 'Chad',
+      'NE': 'Niger',
+      'ML': 'Mali',
+      'BF': 'Burkina Faso',
+      'SN': 'Senegal',
+      'GM': 'Gambia',
+      'GN': 'Guinea',
+      'GW': 'Guinea-Bissau',
+      'LR': 'Liberia',
+      'SL': 'Sierra Leone',
+      'CI': 'Ivory Coast',
+      'TG': 'Togo',
+      'BJ': 'Benin',
+      'GA': 'Gabon',
+      'GQ': 'Equatorial Guinea',
+      'CG': 'Republic of the Congo',
+      'CD': 'Democratic Republic of the Congo',
+      'AO': 'Angola',
+      'CV': 'Cape Verde',
+      'KM': 'Comoros',
+      'ST': 'São Tomé and Príncipe',
+      'LY': 'Libya',
+      'TN': 'Tunisia',
+      'DZ': 'Algeria',
+      'MA': 'Morocco',
+      'EH': 'Western Sahara',
+      'MR': 'Mauritania',
+      'RW': 'Rwanda',
+      'BI': 'Burundi',
+      'CM': 'Cameroon'
     };
     
     return countryNames[countryCode] || countryCode;
   }
   
-  // Build validation result - UPDATED FOR CORRECT PHONE PROPERTIES
+  // Build validation result - FIXED TO USE CORRECT PROPERTIES AND FULL COUNTRY NAME
   buildValidationResult(originalPhone, validationData, clientId) {
     const isValid = validationData.valid === true;
     const formatValid = validationData.formatValid !== false;
@@ -917,7 +1068,7 @@ class PhoneValidationService {
     const formattedPhone = validationData.international || validationData.e164 || this.cleanPhoneNumber(originalPhone);
     const wasCorrected = originalPhone !== formattedPhone;
     
-    // Get the country name properly
+    // Get the country CODE and FULL NAME
     const countryCode = validationData.country || null;
     const countryName = countryCode ? this.getCountryName(countryCode) : '';
     
@@ -954,8 +1105,11 @@ class PhoneValidationService {
     }
     
     const result = {
+      // Original and formatted phone
       originalPhone,
       currentPhone: validationData.e164 || this.cleanPhoneNumber(originalPhone),
+      
+      // Validation status
       valid: isValid,
       possible: validationData.isPossible !== false,
       formatValid: formatValid,
@@ -966,7 +1120,7 @@ class PhoneValidationService {
       type: phoneType || 'UNKNOWN',
       lineType: phoneType || 'UNKNOWN',
       
-      // Location info
+      // Location info with FULL COUNTRY NAME
       location: validationData.location || countryName || 'Unknown',
       carrier: validationData.carrier || '',
       areaCode: validationData.areaCode || null,
@@ -979,10 +1133,10 @@ class PhoneValidationService {
       nationalFormat: validationData.national || null,
       uri: validationData.uri || null,
       
-      // Country details
+      // Country details with FULL NAME
       countryCode: countryCode,
       countryCallingCode: validationData.countryCode || null,
-      country: countryName,
+      country: countryName, // FULL COUNTRY NAME
       
       // Mobile detection - FIXED
       isMobile: isMobile,
@@ -998,8 +1152,16 @@ class PhoneValidationService {
       externalApiUsed: validationData.externalApiUsed || false,
       isFictional: validationData.isFictional || false,
       
-      // Status determination - CORRECTED LOGIC
+      // Status determination
       wasCorrected: wasCorrected,
+      
+      // Unmessy specific fields with FULL COUNTRY NAME
+      um_phone: validationData.international || validationData.e164 || originalPhone,
+      um_phone_status: wasCorrected ? 'Changed' : 'Unchanged',
+      um_phone_format: formatValid ? 'Valid' : 'Invalid',
+      um_phone_country_code: countryCode || '',
+      um_phone_country: countryName, // FULL COUNTRY NAME, NOT CODE
+      um_phone_is_mobile: isMobile,
       
       // For debugging/monitoring
       detectedCountry: validationData.country,
@@ -1043,6 +1205,9 @@ class PhoneValidationService {
       const data = rows[0];
       
       if (data) {
+        // Return cached result with FULL COUNTRY NAME
+        const countryName = this.getCountryName(data.country);
+        
         return {
           originalPhone: data.original_phone,
           currentPhone: data.e164,
@@ -1051,7 +1216,7 @@ class PhoneValidationService {
           formatValid: true,
           type: data.phone_type,
           lineType: data.phone_type,
-          location: this.getCountryName(data.country),
+          location: countryName,
           carrier: data.carrier || '',
           e164: data.e164,
           formatted: data.international_format,
@@ -1060,7 +1225,7 @@ class PhoneValidationService {
           uri: `tel:${data.e164}`,
           countryCode: data.country,
           countryCallingCode: data.country_code,
-          country: this.getCountryName(data.country),
+          country: countryName, // FULL COUNTRY NAME
           isMobile: data.is_mobile,
           isFixedLine: data.phone_type === 'FIXED_LINE',
           confidence: data.confidence_level || 'high',
@@ -1069,6 +1234,12 @@ class PhoneValidationService {
           validationMethod: data.validation_method || 'cached',
           externalApiUsed: data.external_api_used || false,
           wasCorrected: data.original_phone !== data.international_format,
+          um_phone: data.international_format,
+          um_phone_status: data.original_phone !== data.international_format ? 'Changed' : 'Unchanged',
+          um_phone_format: 'Valid',
+          um_phone_country_code: data.country,
+          um_phone_country: countryName, // FULL COUNTRY NAME
+          um_phone_is_mobile: data.is_mobile,
           isFromCache: true
         };
       }
@@ -1093,7 +1264,7 @@ class PhoneValidationService {
         international_format: validationResult.internationalFormat,
         national_format: validationResult.nationalFormat,
         country_code: validationResult.countryCallingCode,
-        country: validationResult.countryCode,
+        country: validationResult.countryCode, // Store ISO code in DB
         phone_type: validationResult.type,
         is_mobile: validationResult.isMobile,
         valid: validationResult.valid,
@@ -1146,3 +1317,4 @@ const phoneValidationService = new PhoneValidationService();
 
 // Export the class and instance 
 export { phoneValidationService, PhoneValidationService };
+export default phoneValidationService;

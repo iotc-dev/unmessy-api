@@ -72,7 +72,83 @@ export class AddressValidationService {
       ['oregon', 'OR'], ['pennsylvania', 'PA'], ['rhode island', 'RI'], ['south carolina', 'SC'],
       ['south dakota', 'SD'], ['tennessee', 'TN'], ['texas', 'TX'], ['utah', 'UT'],
       ['vermont', 'VT'], ['virginia', 'VA'], ['washington', 'WA'], ['west virginia', 'WV'],
-      ['wisconsin', 'WI'], ['wyoming', 'WY']
+      ['wisconsin', 'WI'], ['wyoming', 'WY'],
+      // DC
+      ['district of columbia', 'DC'], ['washington dc', 'DC'], ['washington d.c.', 'DC']
+    ]);
+
+    // Initialize city corrections for common misspellings
+    this.cityCorrections = new Map([
+      ['newyork', 'New York'],
+      ['new york city', 'New York'],
+      ['nyc', 'New York'],
+      ['la', 'Los Angeles'],
+      ['san fran', 'San Francisco'],
+      ['sf', 'San Francisco'],
+      ['philly', 'Philadelphia'],
+      ['vegas', 'Las Vegas'],
+      ['nola', 'New Orleans'],
+      ['chi-town', 'Chicago'],
+      ['chitown', 'Chicago']
+    ]);
+
+    // Known city to state mappings for inference
+    this.cityToState = new Map([
+      ['new york', 'NY'],
+      ['los angeles', 'CA'],
+      ['chicago', 'IL'],
+      ['houston', 'TX'],
+      ['phoenix', 'AZ'],
+      ['philadelphia', 'PA'],
+      ['san antonio', 'TX'],
+      ['san diego', 'CA'],
+      ['dallas', 'TX'],
+      ['san jose', 'CA'],
+      ['austin', 'TX'],
+      ['jacksonville', 'FL'],
+      ['san francisco', 'CA'],
+      ['columbus', 'OH'],
+      ['charlotte', 'NC'],
+      ['indianapolis', 'IN'],
+      ['seattle', 'WA'],
+      ['denver', 'CO'],
+      ['washington', 'DC'],
+      ['boston', 'MA'],
+      ['nashville', 'TN'],
+      ['detroit', 'MI'],
+      ['portland', 'OR'],
+      ['las vegas', 'NV'],
+      ['louisville', 'KY'],
+      ['baltimore', 'MD'],
+      ['milwaukee', 'WI'],
+      ['albuquerque', 'NM'],
+      ['tucson', 'AZ'],
+      ['fresno', 'CA'],
+      ['sacramento', 'CA'],
+      ['kansas city', 'MO'],
+      ['mesa', 'AZ'],
+      ['richmond', 'VA'],
+      ['omaha', 'NE'],
+      ['miami', 'FL'],
+      ['cleveland', 'OH'],
+      ['tulsa', 'OK'],
+      ['raleigh', 'NC'],
+      ['long beach', 'CA'],
+      ['virginia beach', 'VA'],
+      ['minneapolis', 'MN'],
+      ['tampa', 'FL'],
+      ['santa ana', 'CA'],
+      ['arvada', 'CO'],
+      // International
+      ['toronto', 'ON'],
+      ['vancouver', 'BC'],
+      ['montreal', 'QC'],
+      ['calgary', 'AB'],
+      ['ottawa', 'ON'],
+      ['london', 'England'],
+      ['manchester', 'England'],
+      ['birmingham', 'England'],
+      ['cebu city', 'Cebu']
     ]);
   }
   
@@ -99,13 +175,14 @@ export class AddressValidationService {
     return Number(`${lastSixDigits}${clientIdStr}${checkDigit}${config.unmessy.version.replace(/\./g, '')}`);
   }
   
-  // Main validation function
+  // Main validation function with hierarchical approach
   async validateAddress(input, options = {}) {
     const { 
       useOpenCage = config.validation.address.geocode && config.services.openCage.enabled,
       clientId = null,
       country = config.validation.address.defaultCountry,
-      timeout = config.services.openCage.timeout
+      timeout = config.services.openCage.timeout,
+      useCache = true
     } = options;
     
     this.logger.debug('Starting address validation', { 
@@ -117,67 +194,672 @@ export class AddressValidationService {
     // Parse input into components
     const components = this.parseInput(input);
     
-    // Check if we have minimum required data
-    if (!this.hasMinimumData(components)) {
+    // Check if address is empty
+    if (this.isAddressEmpty(components)) {
       return this.buildValidationResult(components, {
         valid: false,
-        confidence: 0,
-        error: 'Insufficient address data provided',
-        wasCorrected: false
+        error: 'Address is required',
+        confidence: 0
       }, clientId);
     }
     
-    // Standardize components
-    const standardized = this.standardizeComponents(components);
+    // Generate cache key before any modifications
+    const cacheKey = this.generateCacheKey(components);
     
-    // Build address string for geocoding
-    const addressString = this.buildAddressString(standardized);
-    
-    // Basic validation
-    const basicValidation = this.validateComponents(standardized);
-    
-    // If OpenCage is enabled, enhance with geocoding
-    if (useOpenCage && this.openCage) {
-      try {
-        const geocodeResult = await ErrorRecovery.withTimeout(
-          this.openCage.geocode(addressString, {
-            countryCode: standardized.um_country_code || country,
-            language: 'en'
-          }),
-          timeout,
-          'OpenCage geocoding'
-        );
-        
-        if (geocodeResult && geocodeResult.found) {
-          // Merge geocoded components with standardized
-          const merged = this.mergeWithGeocodeResult(standardized, geocodeResult);
-          
-          return this.buildValidationResult(merged, {
-            valid: geocodeResult.confidence >= 5,
-            confidence: geocodeResult.confidence,
-            wasCorrected: this.wasAddressCorrected(components, merged),
-            geocoded: true,
-            geometry: geocodeResult.coordinates,
-            formatted: geocodeResult.formattedAddress
-          }, clientId);
-        }
-      } catch (error) {
-        this.logger.warn('OpenCage geocoding failed, falling back to basic validation', error, {
-          address: addressString
-        });
-        // Continue with basic validation
+    // Check cache first if enabled
+    if (useCache) {
+      const cached = await this.checkAddressCache(cacheKey);
+      if (cached) {
+        this.logger.debug('Address found in cache', { cacheKey });
+        return cached;
       }
     }
     
-    // Return basic validation result
-    return this.buildValidationResult(standardized, {
-      valid: basicValidation.valid,
-      confidence: basicValidation.confidence,
-      wasCorrected: this.wasAddressCorrected(components, standardized),
-      warnings: basicValidation.warnings
+    // Standardize components first
+    const standardized = this.standardizeComponents(components);
+    
+    // Perform hierarchical validation
+    const validationResult = await this.performHierarchicalValidation(
+      standardized, 
+      { useOpenCage, timeout, country }
+    );
+    
+    // Build final result
+    const result = this.buildValidationResult(standardized, {
+      valid: validationResult.valid,
+      confidence: validationResult.confidence,
+      wasCorrected: validationResult.wasCorrected || Object.keys(validationResult.corrections).length > 0,
+      warnings: validationResult.warnings,
+      method: validationResult.method,
+      geocoded: validationResult.geocoded,
+      geometry: validationResult.geometry,
+      formatted: validationResult.formatted,
+      completedFields: validationResult.completedFields
     }, clientId);
+    
+    // Save to cache if valid
+    if (useCache && result.valid) {
+      await this.saveAddressCache(cacheKey, result, clientId);
+    }
+    
+    return result;
   }
-  
+
+  // Check if address is empty
+  isAddressEmpty(components) {
+    return !(
+      components.um_address_line_1 ||
+      components.um_street_name ||
+      components.um_city ||
+      components.um_state_province ||
+      components.um_postal_code ||
+      components.um_country
+    );
+  }
+
+  // Enhanced hierarchical validation with OpenCage integration
+  async performHierarchicalValidation(components, options = {}) {
+    const validationResult = {
+      valid: false,
+      confidence: 0,
+      corrections: {},
+      warnings: [],
+      method: 'none',
+      completedFields: [],
+      wasCorrected: false
+    };
+
+    // Level 1: Try OpenCage first if we have partial address
+    if (options.useOpenCage && this.openCage && this.hasMinimalAddressInfo(components)) {
+      try {
+        const openCageResult = await this.completeAddressWithOpenCage(components, options);
+        
+        if (openCageResult.success) {
+          validationResult.valid = true;
+          validationResult.confidence = openCageResult.confidence;
+          validationResult.corrections = openCageResult.corrections;
+          validationResult.completedFields = openCageResult.completedFields;
+          validationResult.method = 'opencage_completion';
+          validationResult.geocoded = true;
+          validationResult.geometry = openCageResult.geometry;
+          validationResult.formatted = openCageResult.formatted;
+          validationResult.wasCorrected = openCageResult.wasCorrected;
+          
+          // Apply corrections
+          Object.assign(components, openCageResult.corrections);
+          
+          // If OpenCage gave us high confidence, we're done
+          if (openCageResult.confidence >= 85) {
+            return validationResult;
+          }
+        }
+      } catch (error) {
+        this.logger.warn('OpenCage completion failed, falling back to other methods', error);
+        validationResult.warnings.push('External geocoding service temporarily unavailable');
+      }
+    }
+
+    // Level 2: Postal Code Validation (Most Specific)
+    if (components.um_postal_code && components.um_country_code) {
+      const postalValidation = await this.validateByPostalCode(
+        components.um_postal_code,
+        components.um_country_code,
+        components,
+        options
+      );
+      
+      if (postalValidation.valid && postalValidation.confidence > validationResult.confidence) {
+        validationResult.valid = true;
+        validationResult.confidence = postalValidation.confidence;
+        validationResult.corrections = { ...validationResult.corrections, ...postalValidation.corrections };
+        validationResult.method = 'postal_code';
+        validationResult.completedFields = [...validationResult.completedFields, ...postalValidation.completedFields];
+        validationResult.wasCorrected = true;
+        
+        // Apply corrections
+        Object.assign(components, postalValidation.corrections);
+      }
+    }
+
+    // Level 3: City + State Validation
+    if (components.um_city && components.um_state_province) {
+      const cityStateValidation = await this.validateCityState(
+        components.um_city,
+        components.um_state_province,
+        components.um_country_code || 'US',
+        options
+      );
+      
+      if (cityStateValidation.valid && cityStateValidation.confidence > validationResult.confidence) {
+        validationResult.valid = true;
+        validationResult.confidence = cityStateValidation.confidence;
+        validationResult.corrections = { ...validationResult.corrections, ...cityStateValidation.corrections };
+        validationResult.method = validationResult.method === 'opencage_completion' ? 'opencage_and_city_state' : 'city_state';
+        validationResult.completedFields = [...validationResult.completedFields, ...cityStateValidation.completedFields];
+        validationResult.wasCorrected = true;
+        
+        // Apply corrections
+        Object.assign(components, cityStateValidation.corrections);
+      }
+    }
+
+    // Level 4: Fuzzy Matching for Partial Info
+    if (!validationResult.valid || validationResult.confidence < 70) {
+      const fuzzyValidation = this.performFuzzyMatching(components);
+      
+      if (fuzzyValidation.confidence > 50) {
+        validationResult.valid = true;
+        validationResult.confidence = Math.max(validationResult.confidence, fuzzyValidation.confidence);
+        validationResult.corrections = { ...validationResult.corrections, ...fuzzyValidation.corrections };
+        validationResult.warnings = [...validationResult.warnings, ...fuzzyValidation.warnings];
+        validationResult.method = validationResult.method === 'none' ? 'fuzzy_match' : validationResult.method + '_and_fuzzy';
+        validationResult.wasCorrected = true;
+        
+        // Apply corrections
+        Object.assign(components, fuzzyValidation.corrections);
+      }
+    }
+
+    // If still not valid, perform basic validation
+    if (!validationResult.valid) {
+      const basicValidation = this.validateComponents(components);
+      validationResult.valid = basicValidation.valid;
+      validationResult.confidence = basicValidation.confidence;
+      validationResult.warnings = [...validationResult.warnings, ...basicValidation.warnings];
+      validationResult.method = 'basic';
+    }
+
+    return validationResult;
+  }
+
+  // Check if we have minimal address info for OpenCage
+  hasMinimalAddressInfo(components) {
+    return !!(
+      components.um_postal_code ||
+      (components.um_city && components.um_state_province) ||
+      components.um_address_line_1 ||
+      (components.um_street_name && components.um_city) ||
+      components.um_city ||
+      components.um_state_province
+    );
+  }
+
+  // Complete address using OpenCage API
+  async completeAddressWithOpenCage(components, options) {
+    const result = {
+      success: false,
+      confidence: 0,
+      corrections: {},
+      completedFields: [],
+      wasCorrected: false
+    };
+
+    // Build query from available components (most specific to least specific)
+    const queryParts = [];
+    
+    // Street address
+    if (components.um_address_line_1) {
+      queryParts.push(components.um_address_line_1);
+    } else if (components.um_house_number || components.um_street_name) {
+      const streetParts = [];
+      if (components.um_house_number) streetParts.push(components.um_house_number);
+      if (components.um_street_direction) streetParts.push(components.um_street_direction);
+      if (components.um_street_name) streetParts.push(components.um_street_name);
+      if (components.um_street_type) streetParts.push(components.um_street_type);
+      if (streetParts.length > 0) {
+        queryParts.push(streetParts.join(' '));
+      }
+    }
+    
+    // City, State, Postal Code
+    if (components.um_city) queryParts.push(components.um_city);
+    if (components.um_state_province) queryParts.push(components.um_state_province);
+    if (components.um_postal_code) queryParts.push(components.um_postal_code);
+    if (components.um_country) queryParts.push(components.um_country);
+    else if (components.um_country_code) queryParts.push(components.um_country_code);
+    
+    const query = queryParts.filter(Boolean).join(', ');
+    
+    if (!query || query.length < 3) {
+      return result;
+    }
+
+    try {
+      // Call OpenCage with the partial address
+      const geocodeOptions = {
+        countryCode: components.um_country_code || options.country,
+        language: 'en',
+        limit: 1,
+        no_annotations: 0 // We want full annotations for better data
+      };
+
+      // Add bounds if we have country code
+      const bounds = this.getBoundsForCountry(components.um_country_code);
+      if (bounds) {
+        geocodeOptions.bounds = bounds;
+      }
+
+      const geocodeResult = await ErrorRecovery.withTimeout(
+        this.openCage.geocode(query, geocodeOptions),
+        options.timeout || 10000,
+        'OpenCage geocoding'
+      );
+
+      if (geocodeResult && geocodeResult.found && geocodeResult.components) {
+        const gc = geocodeResult.components;
+        
+        // Track what fields we're completing
+        const completedFields = [];
+        
+        // Complete missing house number
+        if (!components.um_house_number && gc.house_number) {
+          result.corrections.um_house_number = gc.house_number;
+          completedFields.push('house_number');
+          result.wasCorrected = true;
+        }
+        
+        // Complete missing street name and type
+        if (gc.road) {
+          const roadParts = this.parseRoadName(gc.road);
+          
+          if (!components.um_street_name && roadParts.name) {
+            result.corrections.um_street_name = roadParts.name;
+            completedFields.push('street_name');
+            result.wasCorrected = true;
+          }
+          
+          if (!components.um_street_type && roadParts.type) {
+            result.corrections.um_street_type = roadParts.type;
+            completedFields.push('street_type');
+            result.wasCorrected = true;
+          }
+        }
+        
+        // Complete missing city
+        if (!components.um_city && (gc.city || gc.town || gc.village || gc.municipality)) {
+          const city = gc.city || gc.town || gc.village || gc.municipality;
+          result.corrections.um_city = this.titleCase(city);
+          completedFields.push('city');
+          result.wasCorrected = true;
+        }
+        
+        // Complete missing state/province
+        if (!components.um_state_province && (gc.state || gc.province)) {
+          const state = gc.state || gc.province;
+          // For US, abbreviate state names
+          if ((components.um_country_code === 'US' || gc.country_code === 'us') && state) {
+            const stateAbbrev = this.getStateAbbreviation(state);
+            result.corrections.um_state_province = stateAbbrev || state;
+          } else {
+            result.corrections.um_state_province = state;
+          }
+          completedFields.push('state_province');
+          result.wasCorrected = true;
+        }
+        
+        // Complete missing postal code
+        if (!components.um_postal_code && gc.postcode) {
+          result.corrections.um_postal_code = this.formatPostalCode(
+            gc.postcode, 
+            gc.country_code?.toUpperCase() || components.um_country_code || 'US'
+          );
+          completedFields.push('postal_code');
+          result.wasCorrected = true;
+        }
+        
+        // Complete missing country
+        if (!components.um_country && gc.country) {
+          result.corrections.um_country = gc.country;
+          completedFields.push('country');
+          result.wasCorrected = true;
+        }
+        
+        if (!components.um_country_code && gc.country_code) {
+          result.corrections.um_country_code = gc.country_code.toUpperCase();
+          completedFields.push('country_code');
+          result.wasCorrected = true;
+        }
+        
+        // Build complete address lines if missing
+        if (!components.um_address_line_1 && (result.corrections.um_street_name || components.um_street_name)) {
+          result.corrections.um_address_line_1 = this.buildAddressLine1({
+            ...components,
+            ...result.corrections
+          });
+          completedFields.push('address_line_1');
+          result.wasCorrected = true;
+        }
+        
+        // Calculate confidence based on what we found
+        if (completedFields.length > 0 || geocodeResult.confidence >= 7) {
+          result.success = true;
+          result.completedFields = completedFields;
+          
+          // Base confidence on geocoding confidence and number of fields completed
+          const geocodeConfidence = (geocodeResult.confidence || 7) * 10; // Convert 1-10 to percentage
+          const completionBonus = Math.min(completedFields.length * 5, 20);
+          result.confidence = Math.min(geocodeConfidence + completionBonus, 95);
+          
+          // Add geocoding metadata
+          if (geocodeResult.coordinates) {
+            result.geometry = {
+              lat: geocodeResult.coordinates.lat,
+              lng: geocodeResult.coordinates.lng
+            };
+          }
+          
+          if (geocodeResult.formattedAddress) {
+            result.formatted = geocodeResult.formattedAddress;
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error('OpenCage address completion failed', error);
+      throw error;
+    }
+
+    return result;
+  }
+
+  // Parse road name to extract street name and type
+  parseRoadName(road) {
+    const result = {
+      name: road,
+      type: null
+    };
+    
+    if (!road) return result;
+    
+    const words = road.split(' ');
+    const lastWord = words[words.length - 1].toLowerCase();
+    
+    // Check if last word is a street type
+    if (this.streetTypes.has(lastWord)) {
+      result.type = this.streetTypes.get(lastWord);
+      result.name = words.slice(0, -1).join(' ');
+    }
+    
+    return result;
+  }
+
+  // Get state abbreviation
+  getStateAbbreviation(stateName) {
+    if (!stateName) return null;
+    
+    const normalized = stateName.toLowerCase().trim();
+    return this.stateAbbreviations.get(normalized) || null;
+  }
+
+  // Get bounding box for country to improve geocoding accuracy
+  getBoundsForCountry(countryCode) {
+    const bounds = {
+      'US': '-125,24,-66,49', // Continental US
+      'CA': '-141,41.7,-52.6,83.1', // Canada
+      'GB': '-8.2,49.9,1.8,60.8', // Great Britain
+      'AU': '112.9,-43.6,153.6,-10.7', // Australia
+      'PH': '116.9,4.6,126.6,21.1', // Philippines
+      'DE': '5.9,47.3,15.0,55.1', // Germany
+      'FR': '-5.2,41.3,9.6,51.1', // France
+      'IT': '6.7,36.6,18.5,47.1', // Italy
+      'ES': '-9.3,36.0,3.3,43.8', // Spain
+      'NL': '3.4,50.8,7.2,53.5', // Netherlands
+      'BE': '2.5,49.5,6.4,51.5', // Belgium
+      'CH': '5.9,45.8,10.5,47.8', // Switzerland
+      'AT': '9.5,46.4,17.2,49.0', // Austria
+      'PL': '14.1,49.0,24.2,54.8', // Poland
+      'CZ': '12.1,48.6,18.9,51.1', // Czech Republic
+      'IN': '68.2,8.1,97.4,37.0', // India
+      'JP': '123.0,24.0,146.0,46.0', // Japan
+      'CN': '73.5,18.2,134.8,53.6', // China
+      'BR': '-73.9,-33.7,-28.8,5.3', // Brazil
+      'MX': '-118.4,14.5,-86.7,32.7', // Mexico
+      'ZA': '16.5,-34.8,32.9,-22.1', // South Africa
+      'NZ': '166.5,-47.3,178.5,-34.4', // New Zealand
+      'SG': '103.6,1.2,104.0,1.5', // Singapore
+      'HK': '113.8,22.2,114.4,22.6', // Hong Kong
+      'KR': '124.6,33.1,131.9,38.6', // South Korea
+      'TH': '97.3,5.6,105.6,20.5', // Thailand
+      'MY': '100.1,0.9,119.3,7.4', // Malaysia
+      'ID': '95.0,-11.0,141.0,6.0', // Indonesia
+      'VN': '102.1,8.4,109.5,23.4', // Vietnam
+      // Add more countries as needed
+    };
+    
+    return bounds[countryCode] || null;
+  }
+
+  // Enhanced postal code validation with OpenCage fallback
+  async validateByPostalCode(postalCode, countryCode, components, options = {}) {
+    const result = {
+      valid: false,
+      confidence: 0,
+      corrections: {},
+      completedFields: []
+    };
+
+    // Check postal code format
+    if (!this.isValidPostalCode(postalCode, countryCode)) {
+      return result;
+    }
+
+    // Try OpenCage reverse geocoding with postal code
+    if (options.useOpenCage && this.openCage) {
+      try {
+        const query = `${postalCode}, ${countryCode}`;
+        const geocodeResult = await ErrorRecovery.withTimeout(
+          this.openCage.geocode(query, {
+            countryCode: countryCode,
+            limit: 1
+          }),
+          options.timeout || 5000,
+          'OpenCage postal code lookup'
+        );
+        
+        if (geocodeResult && geocodeResult.found && geocodeResult.components) {
+          const gc = geocodeResult.components;
+          
+          // Validate and complete city
+          if (gc.city || gc.town || gc.municipality) {
+            const geocodedCity = gc.city || gc.town || gc.municipality;
+            if (!components.um_city || 
+                components.um_city.toLowerCase() !== geocodedCity.toLowerCase()) {
+              result.corrections.um_city = this.titleCase(geocodedCity);
+              result.completedFields.push('city');
+            }
+            result.valid = true;
+            result.confidence = 90;
+          }
+          
+          // Validate and complete state
+          if (gc.state || gc.province) {
+            const geocodedState = countryCode === 'US' ? 
+              this.getStateAbbreviation(gc.state) || gc.state : 
+              gc.state || gc.province;
+              
+            if (!components.um_state_province || 
+                components.um_state_province.toUpperCase() !== geocodedState.toUpperCase()) {
+              result.corrections.um_state_province = geocodedState;
+              result.completedFields.push('state_province');
+            }
+          }
+          
+          return result;
+        }
+      } catch (error) {
+        this.logger.warn('OpenCage postal code lookup failed', { postalCode, error: error.message });
+      }
+    }
+
+    // Fallback to basic format validation
+    result.valid = true;
+    result.confidence = 60;
+    return result;
+  }
+
+  // Enhanced city/state validation with OpenCage
+  async validateCityState(city, state, countryCode, options = {}) {
+    const result = {
+      valid: false,
+      confidence: 0,
+      corrections: {},
+      completedFields: []
+    };
+
+    if (!city || !state) {
+      return result;
+    }
+
+    // Try OpenCage validation
+    if (options.useOpenCage && this.openCage) {
+      try {
+        const query = `${city}, ${state}, ${countryCode}`;
+        const geocodeResult = await ErrorRecovery.withTimeout(
+          this.openCage.geocode(query, {
+            countryCode: countryCode,
+            limit: 1
+          }),
+          options.timeout || 5000,
+          'OpenCage city/state lookup'
+        );
+        
+        if (geocodeResult && geocodeResult.found && geocodeResult.components) {
+          const gc = geocodeResult.components;
+          
+          // Validate city/state combination
+          if ((gc.city || gc.town || gc.municipality) && (gc.state || gc.province)) {
+            result.valid = true;
+            result.confidence = 85;
+            
+            // Apply standard formatting
+            const geocodedCity = gc.city || gc.town || gc.municipality;
+            if (geocodedCity) {
+              result.corrections.um_city = this.titleCase(geocodedCity);
+            }
+            
+            // Complete postal code if missing
+            if (!components.um_postal_code && gc.postcode) {
+              result.corrections.um_postal_code = this.formatPostalCode(gc.postcode, countryCode);
+              result.completedFields.push('postal_code');
+              result.confidence = 90;
+            }
+            
+            // Ensure state is properly formatted
+            if (countryCode === 'US' && gc.state) {
+              const abbrev = this.getStateAbbreviation(gc.state) || state.toUpperCase();
+              if (abbrev !== state) {
+                result.corrections.um_state_province = abbrev;
+              }
+            }
+          }
+        }
+      } catch (error) {
+        this.logger.warn('OpenCage city/state validation failed', { city, state, error: error.message });
+      }
+    }
+
+    // Fallback to basic validation
+    if (!result.valid) {
+      // Check our known city/state pairs
+      const normalizedCity = city.toLowerCase().trim();
+      const expectedState = this.cityToState.get(normalizedCity);
+      
+      if (expectedState) {
+        if (state.toUpperCase() === expectedState || 
+            this.getStateAbbreviation(state) === expectedState) {
+          result.valid = true;
+          result.confidence = 70;
+          
+          // Apply standard formatting
+          result.corrections.um_city = this.titleCase(city);
+          
+          if (countryCode === 'US' && state.length > 2) {
+            const abbrev = this.stateAbbreviations.get(state.toLowerCase());
+            if (abbrev) {
+              result.corrections.um_state_province = abbrev;
+            }
+          }
+        }
+      }
+    }
+
+    return result;
+  }
+
+  // Fuzzy matching for partial information
+  performFuzzyMatching(components) {
+    const result = {
+      confidence: 0,
+      corrections: {},
+      warnings: []
+    };
+
+    // Try to correct city names with common misspellings
+    if (components.um_city) {
+      const cityLower = components.um_city.toLowerCase();
+      const correctedCity = this.cityCorrections.get(cityLower);
+      
+      if (correctedCity) {
+        result.corrections.um_city = correctedCity;
+        result.confidence += 30;
+      }
+    }
+
+    // Try to infer state from well-known cities
+    if (components.um_city && !components.um_state_province) {
+      const cityLower = components.um_city.toLowerCase();
+      const inferredState = this.cityToState.get(cityLower);
+      
+      if (inferredState) {
+        result.corrections.um_state_province = inferredState;
+        result.confidence += 25;
+        result.warnings.push('State inferred from city name');
+      }
+    }
+
+    // Validate/correct state abbreviations
+    if (components.um_state_province) {
+      const stateLower = components.um_state_province.toLowerCase();
+      if (this.stateAbbreviations.has(stateLower)) {
+        result.corrections.um_state_province = this.stateAbbreviations.get(stateLower);
+        result.confidence += 20;
+      } else if (components.um_state_province.length === 2) {
+        result.corrections.um_state_province = components.um_state_province.toUpperCase();
+        result.confidence += 15;
+      }
+    }
+
+    // Check for obvious country indicators
+    if (!components.um_country_code && components.um_postal_code) {
+      // Canadian postal code pattern
+      if (/^[A-Z]\d[A-Z]\s?\d[A-Z]\d$/i.test(components.um_postal_code)) {
+        result.corrections.um_country_code = 'CA';
+        result.corrections.um_country = 'Canada';
+        result.confidence += 20;
+        result.warnings.push('Country inferred from postal code format');
+      }
+      // UK postal code pattern
+      else if (/^[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}$/i.test(components.um_postal_code)) {
+        result.corrections.um_country_code = 'GB';
+        result.corrections.um_country = 'United Kingdom';
+        result.confidence += 20;
+        result.warnings.push('Country inferred from postal code format');
+      }
+      // Australian postal code (4 digits)
+      else if (/^\d{4}$/.test(components.um_postal_code)) {
+        const code = parseInt(components.um_postal_code);
+        if (code >= 1000 && code <= 9999) {
+          result.corrections.um_country_code = 'AU';
+          result.corrections.um_country = 'Australia';
+          result.confidence += 15;
+          result.warnings.push('Country might be Australia based on postal code format');
+        }
+      }
+    }
+
+    return result;
+  }
+
+  // [Rest of the methods remain the same as in the original file...]
   // Parse input into components
   parseInput(input) {
     const components = {
@@ -364,10 +1046,11 @@ export class AddressValidationService {
   
   // Check if we have minimum required data
   hasMinimumData(components) {
-    // Need at least a street/address line and city
+    // Need at least a street/address line and city OR just postal code with country
     return !!(
-      (components.um_address_line_1 || components.um_street_name) &&
-      (components.um_city || components.um_state_province || components.um_postal_code)
+      ((components.um_address_line_1 || components.um_street_name) &&
+       (components.um_city || components.um_state_province || components.um_postal_code)) ||
+      (components.um_postal_code && (components.um_country || components.um_country_code))
     );
   }
   
@@ -561,8 +1244,8 @@ export class AddressValidationService {
     const geocoded = geocodeResult.components;
     
     // Update with geocoded data if available
-    if (geocoded.houseNumber && !merged.um_house_number) {
-      merged.um_house_number = geocoded.houseNumber;
+    if (geocoded.house_number && !merged.um_house_number) {
+      merged.um_house_number = geocoded.house_number;
     }
     if (geocoded.road) {
       // Parse the road to extract street name and type
@@ -592,13 +1275,13 @@ export class AddressValidationService {
       }
     }
     if (geocoded.postcode) {
-      merged.um_postal_code = this.formatPostalCode(geocoded.postcode, geocoded.countryCode || 'US');
+      merged.um_postal_code = this.formatPostalCode(geocoded.postcode, geocoded.country_code || 'US');
     }
     if (geocoded.country) {
       merged.um_country = geocoded.country;
     }
-    if (geocoded.countryCode) {
-      merged.um_country_code = geocoded.countryCode.toUpperCase();
+    if (geocoded.country_code) {
+      merged.um_country_code = geocoded.country_code.toUpperCase();
     }
     
     // Rebuild address lines with geocoded data
@@ -655,6 +1338,11 @@ export class AddressValidationService {
       }
     }
     
+    // Add completed fields if any
+    if (validationData.completedFields && validationData.completedFields.length > 0) {
+      result.completedFields = validationData.completedFields;
+    }
+    
     // Add validation steps
     result.validationSteps = [
       {
@@ -668,7 +1356,8 @@ export class AddressValidationService {
       {
         step: 'validation',
         passed: validationData.valid,
-        confidence: validationData.confidence
+        confidence: validationData.confidence,
+        method: validationData.method
       }
     ];
     
@@ -810,15 +1499,13 @@ export class AddressValidationService {
     }
   }
   
-  async saveAddressCache(address, validationResult, clientId) {
+  async saveAddressCache(cacheKey, validationResult, clientId) {
     // Only save valid addresses
     if (!validationResult.valid) {
       return;
     }
     
     try {
-      const cacheKey = this.generateCacheKey(validationResult);
-      
       await db.insert('address_validations', {
         cache_key: cacheKey,
         formatted_address: validationResult.formatted_address,
