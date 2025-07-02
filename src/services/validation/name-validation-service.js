@@ -116,7 +116,7 @@ class NameValidationService {
     if (this.nameParticles.size === 0) {
       ['von', 'van', 'de', 'del', 'della', 'di', 'da', 'do', 'dos', 'das', 'du', 
        'la', 'le', 'el', 'les', 'lo', 'mac', 'mc', "o'", 'al', 'bin', 'ibn', 
-       'ap', 'ben', 'bat', 'bint'].forEach(p => 
+       'ap', 'ben', 'bat', 'bint', 'ter', 'ten', 'den', 'der'].forEach(p => 
         this.nameParticles.add(p)
       );
     }
@@ -142,7 +142,7 @@ class NameValidationService {
       this.specialCaseCorrections = new Map([
         ['obrien', "O'Brien"], ['oneill', "O'Neill"], ['odonnell', "O'Donnell"],
         ['mcdonald', 'McDonald'], ['macleod', 'MacLeod'], ['vanhalen', 'Van Halen'],
-        ['desouza', 'De Souza'], ['delafuente', 'De la Fuente']
+        ['desouza', 'De Souza'], ['delafuente', 'De la Fuente'], ['macassi', 'Macassi']
       ]);
     }
   }
@@ -225,7 +225,7 @@ class NameValidationService {
     return this.nameParticles.has(component.toLowerCase());
   }
   
-  // Proper capitalization with special cases
+  // FIXED: Proper capitalization with special cases
   properCapitalize(name, isLastName = false) {
     if (!name) return '';
     
@@ -248,12 +248,26 @@ class NameValidationService {
       return this.specialCaseCorrections.get(loweredName);
     }
     
-    // Handle McSomething and MacSomething
-    if ((loweredName.startsWith('mc') || loweredName.startsWith('mac')) && name.length > 3) {
-      const prefix = name.substring(0, loweredName.startsWith('mac') ? 3 : 2);
-      const rest = name.substring(loweredName.startsWith('mac') ? 3 : 2);
-      return prefix.charAt(0).toUpperCase() + prefix.slice(1).toLowerCase() + 
-             rest.charAt(0).toUpperCase() + rest.slice(1).toLowerCase();
+    // FIXED: Handle McSomething and MacSomething with better logic
+    if (loweredName.startsWith('mac') && name.length > 3) {
+      // Check if the next letter after 'mac' is uppercase in the original
+      // If it is, preserve the original casing pattern
+      if (name.length > 3 && name[3] === name[3].toUpperCase()) {
+        // Keep original Mac casing (like MacAssi)
+        return 'Mac' + name.substring(3);
+      } else {
+        // Standard Mac capitalization
+        return 'Mac' + name.charAt(3).toUpperCase() + name.slice(4).toLowerCase();
+      }
+    }
+    
+    if (loweredName.startsWith('mc') && name.length > 2) {
+      // Same logic for Mc names
+      if (name.length > 2 && name[2] === name[2].toUpperCase()) {
+        return 'Mc' + name.substring(2);
+      } else {
+        return 'Mc' + name.charAt(2).toUpperCase() + name.slice(3).toLowerCase();
+      }
     }
     
     // Handle O'Something
@@ -292,7 +306,7 @@ class NameValidationService {
     return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
   }
   
-  // Parse name components
+  // FIXED: Parse name components with better particle handling
   parseNameComponents(name) {
     const result = {
       firstName: '',
@@ -304,7 +318,7 @@ class NameValidationService {
       wasCorrected: false
     };
     
-    // Handle comma format (Last, First)
+    // Handle comma format (Last, First Middle)
     if (name.includes(',')) {
       result.isCommaFormat = true;
       const parts = name.split(',').map(p => p.trim());
@@ -346,6 +360,7 @@ class NameValidationService {
         result.firstName = firstComponents[0];
       } else if (firstComponents.length > 1) {
         result.firstName = firstComponents[0];
+        // FIXED: Join all remaining parts as middle name
         result.middleName = firstComponents.slice(1).join(' ');
       }
       
@@ -377,26 +392,40 @@ class NameValidationService {
       }
     }
     
-    // Process remaining components
+    // FIXED: Process remaining components with better particle handling
     if (remainingComponents.length === 1) {
+      // Only one name component - treat as first name
       result.firstName = remainingComponents[0];
     } else if (remainingComponents.length === 2) {
+      // Two components - first and last
       result.firstName = remainingComponents[0];
       result.lastName = remainingComponents[1];
     } else if (remainingComponents.length >= 3) {
+      // Three or more components - need to identify where last name starts
       result.firstName = remainingComponents[0];
       
-      // Check for name particle in middle position
-      const middleIndex = 1;
-      if (middleIndex < remainingComponents.length - 1 && 
-          this.isNameParticle(remainingComponents[middleIndex])) {
-        // Particle is part of last name
-        const particle = remainingComponents[middleIndex].toLowerCase();
-        const actualLastName = remainingComponents.slice(middleIndex + 1).join(' ');
-        const capitalizedLastName = this.properCapitalize(actualLastName, true);
-        result.lastName = `${particle} ${capitalizedLastName}`;
+      // Look for particles to determine last name boundary
+      let lastNameStartIndex = -1;
+      
+      // Check each component starting from position 1
+      for (let i = 1; i < remainingComponents.length; i++) {
+        if (this.isNameParticle(remainingComponents[i])) {
+          // Found a particle - this starts the last name
+          lastNameStartIndex = i;
+          break;
+        }
+      }
+      
+      if (lastNameStartIndex > 0) {
+        // Particle found - everything before it is middle name(s)
+        if (lastNameStartIndex > 1) {
+          result.middleName = remainingComponents.slice(1, lastNameStartIndex).join(' ');
+        }
+        // Everything from particle onwards is last name
+        result.lastName = remainingComponents.slice(lastNameStartIndex).join(' ');
       } else {
-        // Standard case
+        // No particles found - treat all middle components as middle name
+        // and last component as last name
         result.lastName = remainingComponents[remainingComponents.length - 1];
         if (remainingComponents.length > 2) {
           result.middleName = remainingComponents.slice(1, -1).join(' ');
@@ -407,7 +436,7 @@ class NameValidationService {
     return result;
   }
   
-  // Main validation function
+  // FIXED: Main validation function with proper change tracking
   validateName(name) {
     this.logger.debug('Starting name validation', { name });
     
@@ -426,7 +455,16 @@ class NameValidationService {
         status: 'invalid',
         subStatus: 'empty_name',
         potentialIssues: ['Null or empty name'],
-        confidenceLevel: 'low'
+        confidenceLevel: 'low',
+        wasCorrected: false,
+        um_first_name: '',
+        um_last_name: '',
+        um_middle_name: '',
+        um_name: '',
+        um_name_status: 'Unchanged',
+        um_name_format: 'Invalid',
+        um_honorific: '',
+        um_suffix: ''
       };
     }
     
@@ -435,6 +473,9 @@ class NameValidationService {
     
     // Check format
     const formatValid = this.isValidNameFormat(sanitizedName);
+    
+    // Track original for comparison
+    const originalName = sanitizedName;
     
     const result = {
       originalName: name,
@@ -482,11 +523,30 @@ class NameValidationService {
     const parsed = this.parseNameComponents(sanitizedName);
     Object.assign(result, parsed);
     
+    // Store original parsed values for comparison
+    const originalFirst = result.firstName;
+    const originalMiddle = result.middleName;
+    const originalLast = result.lastName;
+    
     // Apply proper capitalization
     result.firstName = this.properCapitalize(result.firstName);
     result.lastName = this.properCapitalize(result.lastName, true);
     if (result.middleName) {
       result.middleName = this.properCapitalize(result.middleName);
+    }
+    
+    // FIXED: Check if capitalization or parsing changed anything
+    if (result.firstName !== originalFirst || 
+        result.lastName !== originalLast || 
+        result.middleName !== originalMiddle ||
+        result.wasCorrected ||
+        result.isCommaFormat) {
+      result.wasCorrected = true;
+    }
+    
+    // Check if the original was all uppercase or all lowercase
+    if (originalName === originalName.toUpperCase() || originalName === originalName.toLowerCase()) {
+      result.wasCorrected = true;
     }
     
     // Validation checks
@@ -504,12 +564,22 @@ class NameValidationService {
       result.confidenceLevel = 'medium';
     }
     
-    // Generate unmessy fields
+    // FIXED: Generate unmessy fields including middle name in um_name when present
     result.um_first_name = result.honorific ? 
       `${result.honorific} ${result.firstName}`.trim() : result.firstName;
     result.um_last_name = result.suffix ?
       `${result.lastName} ${result.suffix}`.trim() : result.lastName;
-    result.um_name = `${result.um_first_name} ${result.um_last_name}`.trim();
+    
+    // FIXED: Include middle name in um_name
+    const nameComponents = [result.um_first_name];
+    if (result.middleName) {
+      nameComponents.push(result.middleName);
+    }
+    if (result.um_last_name) {
+      nameComponents.push(result.um_last_name);
+    }
+    result.um_name = nameComponents.filter(Boolean).join(' ');
+    
     result.um_name_status = result.wasCorrected ? 'Changed' : 'Unchanged';
     result.um_name_format = result.formatValid ? 'Valid' : 'Invalid';
     result.um_honorific = result.honorific;
@@ -519,7 +589,7 @@ class NameValidationService {
     return result;
   }
   
-  // Validate separate names
+  // FIXED: Validate separate names with proper tracking
   async validateSeparateNames(firstName, lastName, options = {}) {
     this.logger.debug('Validating separate names', { firstName, lastName });
     
@@ -539,6 +609,7 @@ class NameValidationService {
         subStatus: 'empty_name',
         potentialIssues: ['Null or empty name components'],
         confidenceLevel: 'low',
+        wasCorrected: false,
         um_first_name: '',
         um_last_name: '',
         um_name: '',
@@ -553,6 +624,10 @@ class NameValidationService {
     // Sanitize inputs
     const sanitizedFirst = firstName ? String(firstName).trim().replace(/\s+/g, ' ') : '';
     const sanitizedLast = lastName ? String(lastName).trim().replace(/\s+/g, ' ') : '';
+    
+    // Track originals for comparison
+    const originalFirst = sanitizedFirst;
+    const originalLast = sanitizedLast;
     
     // Reconstruct full name
     const fullName = [sanitizedFirst, sanitizedLast].filter(Boolean).join(' ');
@@ -606,7 +681,7 @@ class NameValidationService {
         }
       }
       
-      // Parse first name for honorific
+      // Parse first name for honorific and middle name
       const firstNameParts = sanitizedFirst.split(' ');
       if (firstNameParts.length > 1) {
         const firstComponent = firstNameParts[0].toLowerCase().replace(/\.$/, '');
@@ -661,11 +736,30 @@ class NameValidationService {
       }
     }
     
+    // Store pre-capitalization values
+    const processedFirst = result.firstName;
+    const processedMiddle = result.middleName;
+    const processedLast = result.lastName;
+    
     // Apply proper capitalization
     result.firstName = this.properCapitalize(result.firstName);
     result.lastName = this.properCapitalize(result.lastName, true);
     if (result.middleName) {
       result.middleName = this.properCapitalize(result.middleName);
+    }
+    
+    // FIXED: Check if anything changed
+    if (result.firstName !== processedFirst || 
+        result.lastName !== processedLast || 
+        result.middleName !== processedMiddle ||
+        result.wasCorrected) {
+      result.wasCorrected = true;
+    }
+    
+    // Check if originals were all uppercase or lowercase
+    if ((originalFirst && (originalFirst === originalFirst.toUpperCase() || originalFirst === originalFirst.toLowerCase())) ||
+        (originalLast && (originalLast === originalLast.toUpperCase() || originalLast === originalLast.toLowerCase()))) {
+      result.wasCorrected = true;
     }
     
     // Validation checks
@@ -683,12 +777,22 @@ class NameValidationService {
       result.confidenceLevel = 'medium';
     }
     
-    // Generate unmessy fields
+    // Generate unmessy fields including middle name
     result.um_first_name = result.honorific ? 
       `${result.honorific} ${result.firstName}`.trim() : result.firstName;
     result.um_last_name = result.suffix ?
       `${result.lastName} ${result.suffix}`.trim() : result.lastName;
-    result.um_name = `${result.um_first_name} ${result.um_last_name}`.trim();
+    
+    // FIXED: Include middle name in um_name
+    const nameComponents = [result.um_first_name];
+    if (result.middleName) {
+      nameComponents.push(result.middleName);
+    }
+    if (result.um_last_name) {
+      nameComponents.push(result.um_last_name);
+    }
+    result.um_name = nameComponents.filter(Boolean).join(' ');
+    
     result.um_name_status = result.wasCorrected ? 'Changed' : 'Unchanged';
     result.um_name_format = result.formatValid ? 'Valid' : 'Invalid';
     result.um_honorific = result.honorific;
@@ -734,6 +838,26 @@ class NameValidationService {
       const data = rows[0];
       
       if (data) {
+        // FIXED: Include middle name in cached um_name
+        const nameComponents = [];
+        if (data.honorific) {
+          nameComponents.push(`${data.honorific} ${data.first_name}`.trim());
+        } else {
+          nameComponents.push(data.first_name);
+        }
+        
+        if (data.middle_name) {
+          nameComponents.push(data.middle_name);
+        }
+        
+        if (data.suffix) {
+          nameComponents.push(`${data.last_name} ${data.suffix}`.trim());
+        } else {
+          nameComponents.push(data.last_name);
+        }
+        
+        const umName = nameComponents.filter(Boolean).join(' ');
+        
         return {
           originalName: data.original_name,
           currentName: data.original_name,
@@ -749,11 +873,12 @@ class NameValidationService {
           potentialIssues: data.potential_issues ? 
             JSON.parse(data.potential_issues) : [],
           confidenceLevel: data.confidence_level,
+          wasCorrected: false, // Cached data is already processed
           um_first_name: data.honorific ? 
             `${data.honorific} ${data.first_name}`.trim() : data.first_name,
           um_last_name: data.suffix ?
             `${data.last_name} ${data.suffix}`.trim() : data.last_name,
-          um_name: `${data.first_name} ${data.last_name}`.trim(),
+          um_name: umName,
           um_name_status: 'Unchanged',
           um_name_format: data.format_valid ? 'Valid' : 'Invalid',
           um_honorific: data.honorific || '',
@@ -810,3 +935,4 @@ const nameValidationService = new NameValidationService();
 
 // Export the class and instance
 export { nameValidationService, NameValidationService };
+export default nameValidationService;

@@ -524,7 +524,8 @@ class QueueService {
             
             // Name validation fields
             'um_first_name', 'um_last_name', 'um_name_status',
-            'um_name_format', 'um_middle_name', 'um_honorific', 'um_suffix'
+            'um_name_format', 'um_middle_name', 'um_honorific', 'um_suffix',
+            'um_name' // Include the full name field
           ]
         }
       );
@@ -909,7 +910,7 @@ class QueueService {
     });
   }
 
-  // Build form data for HubSpot submission with proper fields array structure - UPDATED
+  // FIXED: Build form data for HubSpot submission - properly handle middle name in um_name
   buildFormData(item, contactData, validationResults, clientId) {
     const fields = [];
     
@@ -992,7 +993,7 @@ class QueueService {
       });
     }
     
-    // Add name validation results (um_ fields)
+    // FIXED: Add name validation results - properly handle middle name in um_name
     if (validationResults?.name && !validationResults.name.error) {
       const nameResult = validationResults.name;
       fields.push({
@@ -1033,16 +1034,16 @@ class QueueService {
         });
       }
       
-      // Build full name
-      const fullName = [
-        nameResult.firstName || nameResult.um_first_name || '',
-        nameResult.lastName || nameResult.um_last_name || ''
-      ].filter(n => n).join(' ');
-      
-      if (fullName) {
+      // FIXED: Build full name including middle name
+      if (nameResult.firstName || nameResult.lastName || nameResult.middleName) {
+        const nameParts = [];
+        if (nameResult.firstName) nameParts.push(nameResult.firstName);
+        if (nameResult.middleName) nameParts.push(nameResult.middleName);
+        if (nameResult.lastName) nameParts.push(nameResult.lastName);
+        
         fields.push({
           name: 'um_name',
-          value: fullName
+          value: nameParts.join(' ')
         });
       }
     }
@@ -1070,7 +1071,7 @@ class QueueService {
         { name: 'um_postal_code', value: addressResult.um_postal_code || addressResult.postalCode || '' },
         { name: 'um_country', value: addressResult.um_country || addressResult.country || '' },
         { name: 'um_country_code', value: addressResult.um_country_code || addressResult.countryCode || '' },
-        { name: 'um_address_status', value: addressResult.valid ? 'Valid' : 'Invalid' }
+        { name: 'um_address_status', value: addressResult.um_address_status || 'Unchanged' }
       ];
       
       // Add address line fields if available

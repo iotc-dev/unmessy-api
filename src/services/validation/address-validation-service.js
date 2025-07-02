@@ -859,7 +859,6 @@ export class AddressValidationService {
     return result;
   }
 
-  // [Rest of the methods remain the same as in the original file...]
   // Parse input into components
   parseInput(input) {
     const components = {
@@ -1290,7 +1289,7 @@ export class AddressValidationService {
     return merged;
   }
   
-  // Build validation result
+  // FIXED: Build validation result - only return "Changed" or "Unchanged" for um_address_status
   buildValidationResult(components, validationData, clientId) {
     const now = new Date();
     const epochMs = now.getTime();
@@ -1305,7 +1304,7 @@ export class AddressValidationService {
       confidence: validationData.confidence || 0,
       wasCorrected: validationData.wasCorrected || false,
       
-      // Address status
+      // FIXED: Address status - only "Changed" or "Unchanged"
       um_address_status: validationData.wasCorrected ? 'Changed' : 'Unchanged',
       
       // Formatted full address
