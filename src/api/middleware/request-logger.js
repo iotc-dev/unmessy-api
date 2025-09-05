@@ -39,8 +39,16 @@ function shouldLogRequest(req) {
  * @returns {boolean} Whether to log this request to database
  */
 function shouldLogToDatabase(req) {
-  // Skip static assets and health checks from database logging
-  const skipPaths = ['/health', '/ready', '/live', '/favicon.ico', '/robots.txt'];
+  // Skip static assets, health checks, and cron endpoints from database logging
+  const skipPaths = [
+    '/health', 
+    '/ready', 
+    '/live', 
+    '/favicon.ico', 
+    '/robots.txt',
+    '/cron/',
+    '/queue-processor'
+  ];
   
   return !skipPaths.some(path => req.path.includes(path));
 }

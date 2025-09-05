@@ -18,5 +18,12 @@
       "dest": "/api.cjs"
     }
   ],
-  "regions": ["syd1"]
+  "regions": ["syd1"],
+  {
+  "functions": {
+    "src/api/vercel.js": {
+      "runtime": "nodejs20.x"
+    }
+  }
+}
 }
