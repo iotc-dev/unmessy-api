@@ -188,8 +188,8 @@ export const config = {
     retryBackoffBase: parseInteger(process.env.QUEUE_RETRY_BACKOFF_BASE, 5), // minutes
     retryBackoffMax: parseInteger(process.env.QUEUE_RETRY_BACKOFF_MAX, 120), // minutes
     completedRetentionDays: parseInteger(process.env.QUEUE_COMPLETED_RETENTION_DAYS, 30),
-    batchSize: parseInteger(process.env.QUEUE_BATCH_SIZE, 8), // Changed to 30 items per minute
-    maxConcurrency: parseInteger(process.env.QUEUE_MAX_CONCURRENCY, 2), // Stays at 5
+    batchSize: parseInteger(process.env.QUEUE_BATCH_SIZE, 3), // Changed to 30 items per minute
+    maxConcurrency: parseInteger(process.env.QUEUE_MAX_CONCURRENCY, 1), // Stays at 5
     maxRuntime: parseInteger(process.env.QUEUE_MAX_RUNTIME, 60000), // Changed to 60 seconds
     lockTimeout: parseInteger(process.env.QUEUE_LOCK_TIMEOUT, 300000), // 5 minutes
     // Cron job configuration

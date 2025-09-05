@@ -1,4 +1,4 @@
-// src/services/queue-service.js
+// src/services/queue-service.js - FIXED VERSION
 import db from '../core/db.js';
 import { config } from '../core/config.js';
 import { createServiceLogger } from '../core/logger.js';
@@ -11,6 +11,11 @@ import validationService from './validation-service.js';
 import clientService from './client-service.js';
 import { hubspotService } from './external/hubspot.js';
 import { triggerAlert, ALERT_TYPES } from '../monitoring/alerts.js';
+
+// FIX 1: Increase AbortSignal listener limit
+if (typeof process !== 'undefined' && process.setMaxListeners) {
+  process.setMaxListeners(20);
+}
 
 const logger = createServiceLogger('queue-service');
 
@@ -235,9 +240,20 @@ class QueueService {
         ...stats
       };
     } finally {
+      // FIX 2: Clean up properly in finally block
       this.isProcessing = false;
       this.processingStartTime = null;
-      this.abortController = null;
+      
+      // Clean up abort controller
+      if (this.abortController) {
+        try {
+          this.abortController.abort();
+        } catch (error) {
+          this.logger.debug('AbortController cleanup error', error);
+        } finally {
+          this.abortController = null;
+        }
+      }
     }
   }
   
@@ -303,7 +319,7 @@ class QueueService {
     }
   }
   
-  // Process items in parallel with concurrency control
+  // FIX 3: Improved parallel processing with proper cleanup
   async processItemsInParallel(items, options) {
     const { concurrency, maxRuntime, signal } = options;
     const startTime = Date.now();
@@ -331,7 +347,7 @@ class QueueService {
       while (queue.length > 0 && inProgress.size < concurrency) {
         const item = queue.shift();
         
-        // Create cancellable promise
+        // Create cancellable promise with proper cleanup
         const processingPromise = this.processItemWithTimeout(item, {
           timeout: Math.min(10000, maxRuntime - elapsed - 1000), // Item timeout
           signal
@@ -340,11 +356,10 @@ class QueueService {
         // Track the promise
         inProgress.set(item.id, processingPromise);
         
-        // Handle completion
+        // Handle completion with cleanup
         processingPromise
           .then(result => {
             results.push({ status: 'fulfilled', value: result });
-            inProgress.delete(item.id);
           })
           .catch(error => {
             results.push({ 
@@ -352,6 +367,9 @@ class QueueService {
               reason: error,
               itemId: item.id 
             });
+          })
+          .finally(() => {
+            // FIX 4: Always clean up from inProgress map
             inProgress.delete(item.id);
           });
       }
@@ -362,41 +380,70 @@ class QueueService {
       }
     }
     
-    // Wait for remaining items
+    // Wait for remaining items with timeout
     if (inProgress.size > 0) {
-      const remainingResults = await Promise.allSettled(Array.from(inProgress.values()));
-      results.push(...remainingResults);
+      const remainingPromises = Array.from(inProgress.values());
+      try {
+        const remainingResults = await Promise.allSettled(remainingPromises);
+        results.push(...remainingResults);
+      } catch (error) {
+        this.logger.error('Error waiting for remaining items', error);
+      }
     }
     
     return results;
   }
   
-  // Process a single queue item with timeout
+  // FIX 5: Process a single queue item with proper timeout and cleanup
   async processItemWithTimeout(item, options) {
     const { timeout, signal } = options;
     
+    let timeoutId;
+    let abortHandler;
+    
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new TimeoutError('Item processing', timeout)), timeout);
+      timeoutId = setTimeout(() => {
+        reject(new TimeoutError('Item processing timeout', timeout));
+      }, timeout);
     });
     
     const abortPromise = new Promise((_, reject) => {
-      signal?.addEventListener('abort', () => {
-        reject(new Error('Processing aborted'));
-      });
+      if (signal) {
+        abortHandler = () => {
+          reject(new Error('Processing aborted'));
+        };
+        signal.addEventListener('abort', abortHandler);
+      }
     });
     
     try {
-      const result = await Promise.race([
-        this.processQueueItem(item),
-        timeoutPromise,
-        abortPromise
-      ]);
+      const promises = [this.processQueueItem(item), timeoutPromise];
       
+      // Only add abort promise if signal exists
+      if (signal && abortHandler) {
+        promises.push(abortPromise);
+      }
+      
+      const result = await Promise.race(promises);
       return result;
+      
     } catch (error) {
       // Update item as failed
       await this.markItemFailed(item, error);
       throw error;
+    } finally {
+      // FIX 6: Critical cleanup in finally block
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      
+      if (signal && abortHandler) {
+        try {
+          signal.removeEventListener('abort', abortHandler);
+        } catch (cleanupError) {
+          this.logger.debug('Error cleaning up abort listener', cleanupError);
+        }
+      }
     }
   }
   
